@@ -1,41 +1,41 @@
+using CHEPGenericExporterApp.Configuration;
+using CHEPGenericExporterApp.Models;
+using Microsoft.Extensions.Options;
 using OfficeOpenXml;
-using System;
-using System.Collections.Generic;
 using System.Globalization;
-using System.IO;
 using System.IO.Compression;
-using System.Linq;
 using System.Text;
-using GocatorShiftExportApp.Models;
 
-namespace GocatorShiftExportApp.ViewModels
+namespace CHEPGenericExporterApp.Services.Reports;
+
+public sealed class CombinedExcelReportService
 {
-    public class CombinedExcelGenerator
+    private readonly string _gocatorCombinedFolder;
+    private readonly string _s1Folder;
+    private readonly string _s2Folder;
+    private readonly string _s4Folder;
+    private readonly string _s5Folder;
+    private readonly string _combinedReportFolder;
+    private readonly string _siteCode;
+    private readonly ILogger<CombinedExcelReportService> _logger;
+
+    public CombinedExcelReportService(
+        IOptions<ExportPathsOptions> pathsOptions,
+        ExportPathResolver pathResolver,
+        ILogger<CombinedExcelReportService> logger)
     {
-        private readonly string _gocatorCombinedFolder;
-        private readonly string _s1Folder;
-        private readonly string _s2Folder;
-        private readonly string _s4Folder;
-        private readonly string _s5Folder;
-        private readonly string _combinedReportFolder;
+        _logger = logger;
+        var o = pathsOptions.Value;
+        _gocatorCombinedFolder = pathResolver.Resolve(o.GocatorCombinedFolder);
+        _s1Folder = pathResolver.Resolve(o.S1Folder);
+        _s2Folder = pathResolver.Resolve(o.S2Folder);
+        _s4Folder = pathResolver.Resolve(o.S4Folder);
+        _s5Folder = pathResolver.Resolve(o.S5Folder);
+        _combinedReportFolder = pathResolver.Resolve(o.CombinedReportOutputFolder);
+        _siteCode = string.IsNullOrWhiteSpace(o.NormalizedReportSiteCode) ? "AUB6" : o.NormalizedReportSiteCode;
+    }
 
-        public CombinedExcelGenerator(
-            string gocatorCombinedFolder = @"E:\AMV\GocatorShiftExportApp\Csvs\Combined",
-            string s1Folder = @"E:\AMV\GocatorShiftExportApp\Csvs\S1_DLDataLogs",
-            string s2Folder = @"E:\AMV\GocatorShiftExportApp\Csvs\S2_DLDataLogs",
-            string s4Folder = @"E:\AMV\GocatorShiftExportApp\Csvs\Station4Defects",
-            string s5Folder = @"E:\AMV\GocatorShiftExportApp\Csvs\Station5Defects",
-            string combinedReportFolder = @"E:\AMV\GocatorShiftExportApp\Csvs\Combined")
-        {
-            _gocatorCombinedFolder = gocatorCombinedFolder;
-            _s1Folder = s1Folder;
-            _s2Folder = s2Folder;
-            _s4Folder = s4Folder;
-            _s5Folder = s5Folder;
-            _combinedReportFolder = combinedReportFolder;
-        }
-
-        public CombinedReportResult GenerateCombinedExcelReport()
+    public CombinedReportResult? GenerateCombinedExcelReport()
         {
             try
             {
@@ -49,17 +49,17 @@ namespace GocatorShiftExportApp.ViewModels
 
                 if (gocatorCsvFile == null)
                 {
-                    Console.WriteLine("No combined Gocator CSV file found in Combined folder.");
+                    _logger.LogWarning("No combined Gocator CSV file found in folder {Folder}.", _gocatorCombinedFolder);
                     return null;
                 }
 
-                Console.WriteLine($"Processing Gocator file: {Path.GetFileName(gocatorCsvFile)}");
+                _logger.LogInformation("Processing Gocator file: {File}", Path.GetFileName(gocatorCsvFile));
 
                 // Read combined Gocator CSV
                 var gocatorData = ReadCsvFile(gocatorCsvFile);
                 if (gocatorData == null || gocatorData.Rows.Count == 0)
                 {
-                    Console.WriteLine("Gocator CSV file has insufficient data rows.");
+                    _logger.LogWarning("Gocator CSV file has insufficient data rows.");
                     return null;
                 }
 
@@ -75,7 +75,7 @@ namespace GocatorShiftExportApp.ViewModels
 
                 if (s1File == null && s2File == null && s4File == null && s5File == null)
                 {
-                    Console.WriteLine($"No shift files found for Shift {shift} and Date {date}.");
+                    _logger.LogWarning("No shift files found for Shift {Shift} and Date {Date}.", shift, date);
                     return null;
                 }
 
@@ -87,25 +87,25 @@ namespace GocatorShiftExportApp.ViewModels
 
                 if (s1File != null)
                 {
-                    Console.WriteLine($"Processing S1 file: {Path.GetFileName(s1File)}");
+                    _logger.LogInformation("Processing S1 file: {File}", Path.GetFileName(s1File));
                     s1Data = ReadShiftFile(s1File, "S1");
                 }
 
                 if (s2File != null)
                 {
-                    Console.WriteLine($"Processing S2 file: {Path.GetFileName(s2File)}");
+                    _logger.LogInformation("Processing S2 file: {File}", Path.GetFileName(s2File));
                     s2Data = ReadShiftFile(s2File, "S2");
                 }
 
                 if (s4File != null)
                 {
-                    Console.WriteLine($"Processing S4 file: {Path.GetFileName(s4File)}");
+                    _logger.LogInformation("Processing S4 file: {File}", Path.GetFileName(s4File));
                     s4Data = ReadShiftFile(s4File, "S4");
                 }
 
                 if (s5File != null)
                 {
-                    Console.WriteLine($"Processing S5 file: {Path.GetFileName(s5File)}");
+                    _logger.LogInformation("Processing S5 file: {File}", Path.GetFileName(s5File));
                     s5Data = ReadShiftFile(s5File, "S5");
                 }
 
@@ -134,18 +134,17 @@ namespace GocatorShiftExportApp.ViewModels
                 string excelFileName = Path.Combine(_combinedReportFolder, $"Combined_Report_Shift_{shift}_{date}.xlsx");
                 CreateExcelFile(excelFileName, gocatorData, s1Data, s2Data, s4Data, s5Data, out string normalizedCsvPath, out string normalizedZipPath);
 
-                Console.WriteLine($"Combined Excel file saved to: {excelFileName}");
+                _logger.LogInformation("Combined Excel file saved to: {Path}", excelFileName);
                 if (!string.IsNullOrEmpty(normalizedCsvPath))
-                    Console.WriteLine($"Normalized report saved to CSV: {normalizedCsvPath}");
+                    _logger.LogInformation("Normalized report saved to CSV: {Path}", normalizedCsvPath);
                 if (!string.IsNullOrEmpty(normalizedZipPath))
-                    Console.WriteLine($"Normalized report zip created: {normalizedZipPath}");
+                    _logger.LogInformation("Normalized report zip created: {Path}", normalizedZipPath);
 
                 return new CombinedReportResult { ExcelFilePath = excelFileName, NormalizedCsvPath = normalizedCsvPath, NormalizedZipPath = normalizedZipPath };
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error generating combined Excel report: {ex.Message}");
-                Console.WriteLine($"Stack trace: {ex.StackTrace}");
+                _logger.LogError(ex, "Error generating combined Excel report.");
                 return null;
             }
         }
@@ -157,7 +156,7 @@ namespace GocatorShiftExportApp.ViewModels
                 string[] lines = File.ReadAllLines(filePath);
                 if (lines.Length < 2)
                 {
-                    Console.WriteLine($"CSV file has insufficient data rows: {filePath}");
+                    _logger.LogWarning("CSV file has insufficient data rows: {Path}", filePath);
                     return null;
                 }
 
@@ -169,7 +168,7 @@ namespace GocatorShiftExportApp.ViewModels
                     string[] values = lines[i].Split(',');
                     if (values.Length != headers.Length)
                     {
-                        Console.WriteLine($"Row {i} in CSV has {values.Length} columns, expected {headers.Length}. Skipping.");
+                        _logger.LogDebug("Row {Row} in CSV has {Actual} columns, expected {Expected}. Skipping.", i, values.Length, headers.Length);
                         continue;
                     }
 
@@ -186,7 +185,7 @@ namespace GocatorShiftExportApp.ViewModels
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error reading CSV file {filePath}: {ex.Message}");
+                _logger.LogWarning(ex, "Error reading CSV file {Path}.", filePath);
                 return null;
             }
         }
@@ -198,7 +197,7 @@ namespace GocatorShiftExportApp.ViewModels
                 string[] lines = File.ReadAllLines(filePath);
                 if (lines.Length < 3) // Shift files have 2 header rows
                 {
-                    Console.WriteLine($"Shift file has insufficient data rows: {filePath}");
+                    _logger.LogWarning("Shift file has insufficient data rows: {Path}", filePath);
                     return null;
                 }
 
@@ -224,7 +223,7 @@ namespace GocatorShiftExportApp.ViewModels
                     string[] values = lines[i].Split(',');
                     if (values.Length != headers.Length)
                     {
-                        Console.WriteLine($"Row {i} in shift file has {values.Length} columns, expected {headers.Length}. Skipping.");
+                        _logger.LogDebug("Row {Row} in shift file has {Actual} columns, expected {Expected}. Skipping.", i, values.Length, headers.Length);
                         continue;
                     }
 
@@ -250,7 +249,7 @@ namespace GocatorShiftExportApp.ViewModels
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error reading shift file {filePath}: {ex.Message}");
+                _logger.LogWarning(ex, "Error reading shift file {Path}.", filePath);
                 return null;
             }
         }
@@ -360,7 +359,7 @@ namespace GocatorShiftExportApp.ViewModels
 
             if (string.IsNullOrEmpty(dateCol) || string.IsNullOrEmpty(timestampCol))
             {
-                Console.WriteLine("Could not find Top:Date or Top:Timestamp columns in Gocator CSV.");
+                _logger.LogWarning("Could not find Top:Date or Top:Timestamp columns in Gocator CSV.");
                 return;
             }
 
@@ -374,7 +373,7 @@ namespace GocatorShiftExportApp.ViewModels
 
             if (string.IsNullOrEmpty(dateCol) || string.IsNullOrEmpty(timestampCol))
             {
-                Console.WriteLine($"Could not find Date or Timestamp columns in {shiftData.Station} shift file.");
+                _logger.LogWarning("Could not find Date or Timestamp columns in {Station} shift file.", shiftData.Station);
                 return;
             }
 
@@ -676,6 +675,7 @@ namespace GocatorShiftExportApp.ViewModels
         }
 
         private static void WriteNormalizedReportCsv(
+            string siteCode,
             string filePath,
             IList<(string Date, string Timestamp, string Shift, string Attribute, string VisionStation, string Value)> normalizedRows)
         {
@@ -694,7 +694,7 @@ namespace GocatorShiftExportApp.ViewModels
                 {
                     string chepId = $"{row.Date}|{row.Timestamp}";
                     writer.WriteLine(
-                        $"{EscapeCsv("AUB6")}," +
+                        $"{EscapeCsv(siteCode)}," +
                         $"{EscapeCsv(row.Date)}," +
                         $"{EscapeCsv(row.Timestamp)}," +
                         $"{EscapeCsv(row.Shift)}," +
@@ -769,7 +769,7 @@ namespace GocatorShiftExportApp.ViewModels
 
             if (!string.IsNullOrEmpty(normalizedCsvOutputPath))
             {
-                WriteNormalizedReportCsv(normalizedCsvOutputPath, normalizedRows);
+                WriteNormalizedReportCsv(_siteCode, normalizedCsvOutputPath, normalizedRows);
                 return normalizedCsvOutputPath;
             }
             return null;
@@ -1247,5 +1247,4 @@ namespace GocatorShiftExportApp.ViewModels
             public string[] Values { get; set; } // Store values by index to handle duplicate column names
             public DateTime? FullTimestamp { get; set; }
         }
-    }
 }
