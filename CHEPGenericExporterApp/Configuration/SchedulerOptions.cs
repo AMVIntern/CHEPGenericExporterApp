@@ -8,7 +8,10 @@ public sealed class SchedulerOptions
     /// <summary>IANA ID (e.g. Australia/Sydney) or "Local".</summary>
     public string TimeZoneId { get; set; } = "Local";
 
-    /// <summary>Wall times for Gocator CSV merge (default 06:00, 14:00, 22:00).</summary>
+    /// <summary>
+    /// Wall times for Gocator CSV merge (default 06:00, 14:00, 22:00). With exactly three entries, order must stay
+    /// morning → afternoon → evening: 06:00 maps to Shift 3 / previous calendar day; 14:00 → Shift 1 / same day; 22:00 → Shift 2 / same day.
+    /// </summary>
     public List<string>? GocatorTimes { get; set; }
 
     /// <summary>Wall times for combined Excel + email (default 06:02, 14:02, 22:02). Must match <see cref="GocatorTimes"/> count.</summary>

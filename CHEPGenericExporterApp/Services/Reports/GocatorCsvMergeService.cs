@@ -1,5 +1,7 @@
 using CHEPGenericExporterApp.Configuration;
 using CHEPGenericExporterApp.Models;
+using CHEPGenericExporterApp.Services.Email;
+using CHEPGenericExporterApp.Services.Scheduling;
 using Microsoft.Extensions.Options;
 
 namespace CHEPGenericExporterApp.Services.Reports;
@@ -8,22 +10,28 @@ namespace CHEPGenericExporterApp.Services.Reports;
 public sealed class GocatorCsvMergeService
 {
     private readonly ExportPathResolver _pathResolver;
+    private readonly IMissingFileAlertSender _missingFileAlerts;
     private readonly ILogger<GocatorCsvMergeService> _logger;
 
     public GocatorCsvMergeService(
         IOptions<ExportPathsOptions> pathsOptions,
         ExportPathResolver pathResolver,
+        IMissingFileAlertSender missingFileAlerts,
         ILogger<GocatorCsvMergeService> logger)
     {
         Paths = pathsOptions.Value;
         _pathResolver = pathResolver;
+        _missingFileAlerts = missingFileAlerts;
         _logger = logger;
     }
 
     private ExportPathsOptions Paths { get; }
 
-    /// <summary>Writes merged Gocator CSV. Returns output path on success; otherwise <c>null</c>.</summary>
-    public string? GenerateCombinedCsv()
+    /// <summary>
+    /// Merges latest Top/Bottom *values* CSVs (by last write time), matches rows within 1.5s, writes
+    /// <c>Gocator_Report_Shift_{shift}_{date}.csv</c> using shift/date from the first merged row (same as GocatorShiftExportApp).
+    /// </summary>
+    public async Task<string?> GenerateCombinedCsvAsync(ReportSlotContext slot, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -33,32 +41,41 @@ public sealed class GocatorCsvMergeService
 
             Directory.CreateDirectory(combinedFolder);
 
-            string? topFile = Directory.GetFiles(topFolder, "*.csv")
-                .Where(f => Path.GetFileName(f).ToLowerInvariant().Contains("values"))
-                .OrderByDescending(f => File.GetLastWriteTime(f))
-                .FirstOrDefault();
+            var missing = new List<string>();
 
-            if (topFile == null)
+            if (!Directory.Exists(topFolder))
+                missing.Add($"Top Gocator folder missing: {topFolder}");
+            else if (FindLatestValuesCsv(topFolder) == null)
             {
                 _logger.LogWarning("No CSV file containing 'values' found in Top folder {Folder}.", topFolder);
-                return null;
+                missing.Add($"No CSV file containing 'values' found in Top folder: {topFolder}");
             }
 
-            string? bottomFile = Directory.GetFiles(bottomFolder, "*.csv")
-                .Where(f => Path.GetFileName(f).ToLowerInvariant().Contains("values"))
-                .OrderByDescending(f => File.GetLastWriteTime(f))
-                .FirstOrDefault();
-
-            if (bottomFile == null)
+            if (!Directory.Exists(bottomFolder))
+                missing.Add($"Bottom Gocator folder missing: {bottomFolder}");
+            else if (FindLatestValuesCsv(bottomFolder) == null)
             {
                 _logger.LogWarning("No CSV file containing 'values' found in Bottom folder {Folder}.", bottomFolder);
+                missing.Add($"No CSV file containing 'values' found in Bottom folder: {bottomFolder}");
+            }
+
+            if (missing.Count > 0)
+            {
+                await _missingFileAlerts.SendMissingFilesAlertAsync(missing, cancellationToken, scheduledSlot: slot).ConfigureAwait(false);
                 return null;
             }
+
+            var topFile = FindLatestValuesCsv(topFolder)!;
+            var bottomFile = FindLatestValuesCsv(bottomFolder)!;
 
             var topData = ReadCsvFile(topFile, "Top");
             if (topData == null || topData.Rows.Count == 0)
             {
                 _logger.LogWarning("Top CSV file has insufficient data rows.");
+                await _missingFileAlerts.SendMissingFilesAlertAsync(new[]
+                {
+                    $"Top Gocator raw CSV is unreadable or has no data rows: {topFile}"
+                }, cancellationToken, scheduledSlot: slot).ConfigureAwait(false);
                 return null;
             }
 
@@ -66,6 +83,10 @@ public sealed class GocatorCsvMergeService
             if (bottomData == null || bottomData.Rows.Count == 0)
             {
                 _logger.LogWarning("Bottom CSV file has insufficient data rows.");
+                await _missingFileAlerts.SendMissingFilesAlertAsync(new[]
+                {
+                    $"Bottom Gocator raw CSV is unreadable or has no data rows: {bottomFile}"
+                }, cancellationToken, scheduledSlot: slot).ConfigureAwait(false);
                 return null;
             }
 
@@ -78,6 +99,10 @@ public sealed class GocatorCsvMergeService
                 string.IsNullOrEmpty(bottomDateCol) || string.IsNullOrEmpty(bottomTimestampCol))
             {
                 _logger.LogWarning("Could not find required date/timestamp columns in CSV files.");
+                await _missingFileAlerts.SendMissingFilesAlertAsync(new[]
+                {
+                    "Could not find required date/timestamp columns in Top/Bottom CSV (need top:date, top:timestamp, bot:date, bot:timestamp)."
+                }, cancellationToken, scheduledSlot: slot).ConfigureAwait(false);
                 return null;
             }
 
@@ -154,21 +179,25 @@ public sealed class GocatorCsvMergeService
                 }
             }
 
+            string shiftCol = FindColumnByName(combinedHeaders.ToArray(), new[] { "shift" });
+            string dateCol = FindColumnByName(combinedHeaders.ToArray(), new[] { "top:date" });
+
             if (combinedRows.Count == 0)
             {
                 _logger.LogWarning("No matching rows found between Top and Bottom CSV files.");
+                await _missingFileAlerts.SendMissingFilesAlertAsync(new[]
+                {
+                    "No matching rows found between Top and Bottom Gocator CSV files (within 1.5s timestamp pairing)."
+                }, cancellationToken, scheduledSlot: slot).ConfigureAwait(false);
                 return null;
             }
-
-            string shiftCol = FindColumnByName(combinedHeaders, new[] { "shift" });
-            string dateCol = FindColumnByName(combinedHeaders, new[] { "top:date" });
 
             string shiftValue = shiftCol != null && combinedRows[0].ContainsKey(shiftCol)
                 ? combinedRows[0][shiftCol]
                 : "Unknown";
             string dateValue = dateCol != null && combinedRows[0].ContainsKey(dateCol)
                 ? combinedRows[0][dateCol]
-                : DateTime.Now.ToString("dd-MMM-yyyy");
+                : DateTime.Now.ToString("dd-MMM-yyyy", CultureInfo.InvariantCulture);
 
             string combinedFile = Path.Combine(combinedFolder, $"Gocator_Report_Shift_{shiftValue}_{dateValue}.csv");
 
@@ -190,6 +219,17 @@ public sealed class GocatorCsvMergeService
             _logger.LogError(ex, "Error generating Gocator combined CSV.");
             return null;
         }
+    }
+
+    private static string? FindLatestValuesCsv(string folder)
+    {
+        if (!Directory.Exists(folder))
+            return null;
+
+        return Directory.GetFiles(folder, "*.csv")
+            .Where(f => Path.GetFileName(f).ToLowerInvariant().Contains("values"))
+            .OrderByDescending(f => File.GetLastWriteTime(f))
+            .FirstOrDefault();
     }
 
     private CsvData? ReadCsvFile(string filePath, string sourceName)

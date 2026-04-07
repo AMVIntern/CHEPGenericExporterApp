@@ -19,11 +19,15 @@ builder.Services.AddSingleton<IPostConfigureOptions<SmtpOptions>, SmtpPasswordPo
 
 builder.Services.AddSingleton<ExportPathResolver>();
 builder.Services.AddSingleton<IScheduleCalculator, ScheduleCalculator>();
-builder.Services.AddSingleton<IEmailSender, SmtpEmailSender>();
+builder.Services.AddSingleton<SmtpEmailSender>();
+builder.Services.AddSingleton<IEmailRetryQueue, InMemoryEmailRetryQueue>();
+builder.Services.AddSingleton<IEmailSender, ReliableEmailSender>();
+builder.Services.AddSingleton<IMissingFileAlertSender, MissingFileAlertSender>();
 builder.Services.AddSingleton<GocatorCsvMergeService>();
 builder.Services.AddSingleton<CombinedExcelReportService>();
 builder.Services.AddSingleton<ExportPipeline>();
 builder.Services.AddHostedService<ScheduledExportWorker>();
+builder.Services.AddHostedService<EmailRetryWorker>();
 
 var host = builder.Build();
 await host.RunAsync();

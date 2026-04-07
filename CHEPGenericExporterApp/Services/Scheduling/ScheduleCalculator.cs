@@ -1,3 +1,4 @@
+using System.Globalization;
 using CHEPGenericExporterApp.Configuration;
 using Microsoft.Extensions.Options;
 
@@ -28,6 +29,78 @@ public sealed class ScheduleCalculator : IScheduleCalculator
     }
 
     public ScheduledJob GetNextScheduledJob(DateTimeOffset afterUtc) => GetNextAmvJob(afterUtc);
+
+    public ReportSlotContext ResolveReportContext(ScheduledJob job)
+    {
+        var local = TimeZoneInfo.ConvertTimeFromUtc(job.Utc.UtcDateTime, _timeZone);
+        var dateOnly = DateOnly.FromDateTime(local.Date);
+
+        var slots = job.Kind switch
+        {
+            ScheduledJobKind.CombinedReportAndEmail => _combinedSlots,
+            ScheduledJobKind.FullPipeline => _gocatorSlots,
+            _ => _gocatorSlots,
+        };
+
+        var idx = FindMatchingSlotIndex(local, slots, toleranceMinutes: 3);
+        if (idx < 0)
+            idx = FindClosestSlotIndex(local, slots);
+
+        // CHEP three-run day (06:00, 14:00, 22:00 in config order): see MapChepThreeSlotToShiftAndDate.
+        var (shift, reportDate) = MapChepThreeSlotToShiftAndDate(idx, dateOnly);
+
+        var dateStr = reportDate.ToString("dd-MMM-yyyy", CultureInfo.InvariantCulture);
+        return new ReportSlotContext(shift, dateStr, reportDate);
+    }
+
+    /// <summary>
+    /// When exactly three schedule pairs exist (typical 6 / 14 / 22): first run → Shift 3, previous day;
+    /// second → Shift 1, same day; third → Shift 2, same day. Otherwise falls back to slot index + 1 and job date.
+    /// </summary>
+    private (string Shift, DateOnly ReportDate) MapChepThreeSlotToShiftAndDate(int slotIndex, DateOnly jobLocalDate)
+    {
+        if (_gocatorSlots.Length != 3)
+            return ((slotIndex + 1).ToString(CultureInfo.InvariantCulture), jobLocalDate);
+
+        return slotIndex switch
+        {
+            0 => ("3", jobLocalDate.AddDays(-1)),
+            1 => ("1", jobLocalDate),
+            2 => ("2", jobLocalDate),
+            _ => ((slotIndex + 1).ToString(CultureInfo.InvariantCulture), jobLocalDate),
+        };
+    }
+
+    private static int FindMatchingSlotIndex(DateTime local, TimeSpan[] slots, double toleranceMinutes)
+    {
+        var tod = local.TimeOfDay;
+        for (var i = 0; i < slots.Length; i++)
+        {
+            var diff = Math.Abs((tod - slots[i]).TotalMinutes);
+            if (diff <= toleranceMinutes)
+                return i;
+        }
+
+        return -1;
+    }
+
+    private static int FindClosestSlotIndex(DateTime local, TimeSpan[] slots)
+    {
+        var tod = local.TimeOfDay;
+        var best = 0;
+        var bestDiff = double.MaxValue;
+        for (var i = 0; i < slots.Length; i++)
+        {
+            var diff = Math.Abs((tod - slots[i]).TotalMinutes);
+            if (diff < bestDiff)
+            {
+                bestDiff = diff;
+                best = i;
+            }
+        }
+
+        return best;
+    }
 
     /// <summary>Saturday skipped. Sunday: last slot pair only. Mon–Fri: all pairs (Gocator then combined).</summary>
     private ScheduledJob GetNextAmvJob(DateTimeOffset afterUtc)

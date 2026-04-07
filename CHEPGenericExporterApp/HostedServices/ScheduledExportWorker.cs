@@ -60,7 +60,7 @@ public sealed class ScheduledExportWorker : BackgroundService
 
             try
             {
-                await RunJobAsync(nextJob.Kind, stoppingToken).ConfigureAwait(false);
+                await RunJobAsync(nextJob, stoppingToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -73,21 +73,21 @@ public sealed class ScheduledExportWorker : BackgroundService
         }
     }
 
-    private async Task RunJobAsync(ScheduledJobKind kind, CancellationToken stoppingToken)
+    private async Task RunJobAsync(ScheduledJob job, CancellationToken stoppingToken)
     {
-        switch (kind)
+        switch (job.Kind)
         {
             case ScheduledJobKind.GocatorMerge:
-                await _pipeline.RunGocatorMergeOnlyAsync(stoppingToken).ConfigureAwait(false);
+                await _pipeline.RunGocatorMergeOnlyAsync(job, stoppingToken).ConfigureAwait(false);
                 break;
             case ScheduledJobKind.CombinedReportAndEmail:
-                await _pipeline.RunCombinedReportAndEmailAsync(stoppingToken).ConfigureAwait(false);
+                await _pipeline.RunCombinedReportAndEmailAsync(job, stoppingToken).ConfigureAwait(false);
                 break;
             case ScheduledJobKind.FullPipeline:
-                await _pipeline.RunFullPipelineAsync(stoppingToken).ConfigureAwait(false);
+                await _pipeline.RunFullPipelineAsync(job, stoppingToken).ConfigureAwait(false);
                 break;
             default:
-                throw new ArgumentOutOfRangeException(nameof(kind), kind, null);
+                throw new ArgumentOutOfRangeException(nameof(job), job.Kind, null);
         }
     }
 

@@ -3,6 +3,7 @@ using CHEPGenericExporterApp.Configuration;
 using CHEPGenericExporterApp.Models;
 using CHEPGenericExporterApp.Services.Email;
 using CHEPGenericExporterApp.Services.Reports;
+using CHEPGenericExporterApp.Services.Scheduling;
 using Microsoft.Extensions.Options;
 
 namespace CHEPGenericExporterApp.Services;
@@ -13,6 +14,8 @@ public sealed class ExportPipeline
     private readonly GocatorCsvMergeService _gocatorMerge;
     private readonly CombinedExcelReportService _excelReport;
     private readonly IEmailSender _emailSender;
+    private readonly IScheduleCalculator _scheduleCalculator;
+    private readonly IMissingFileAlertSender _missingFileAlerts;
     private readonly EmailOptions _email;
     private readonly ILogger<ExportPipeline> _logger;
 
@@ -20,26 +23,34 @@ public sealed class ExportPipeline
         GocatorCsvMergeService gocatorMerge,
         CombinedExcelReportService excelReport,
         IEmailSender emailSender,
+        IScheduleCalculator scheduleCalculator,
+        IMissingFileAlertSender missingFileAlerts,
         IOptions<EmailOptions> emailOptions,
         ILogger<ExportPipeline> logger)
     {
         _gocatorMerge = gocatorMerge;
         _excelReport = excelReport;
         _emailSender = emailSender;
+        _scheduleCalculator = scheduleCalculator;
+        _missingFileAlerts = missingFileAlerts;
         _email = emailOptions.Value;
         _logger = logger;
     }
 
     /// <summary>Gocator merge for the scheduled slot, then email with the merged CSV (same idea as combined + email).</summary>
-    public Task RunGocatorMergeOnlyAsync(CancellationToken cancellationToken = default) =>
-        RunGocatorMergeWithOptionalEmailAsync(sendEmailAfterMerge: true, cancellationToken);
+    public Task RunGocatorMergeOnlyAsync(ScheduledJob job, CancellationToken cancellationToken = default) =>
+        RunGocatorMergeWithOptionalEmailAsync(job, sendEmailAfterMerge: true, cancellationToken);
 
-    /// <summary>Combined Excel from latest Gocator CSV, then email (second step of each shift window).</summary>
-    public async Task RunCombinedReportAndEmailAsync(CancellationToken cancellationToken = default)
+    /// <summary>Combined Excel for the same scheduled shift/date as the Gocator step, then email.</summary>
+    public async Task RunCombinedReportAndEmailAsync(
+        ScheduledJob job,
+        CancellationToken cancellationToken = default,
+        ReportSlotContext? slotContext = null)
     {
         _logger.LogInformation("Running combined Excel report and email.");
 
-        var reportResult = _excelReport.GenerateCombinedExcelReport();
+        var ctx = slotContext ?? _scheduleCalculator.ResolveReportContext(job);
+        var reportResult = await _excelReport.GenerateCombinedExcelReportAsync(ctx, cancellationToken).ConfigureAwait(false);
 
         if (reportResult == null ||
             string.IsNullOrEmpty(reportResult.ExcelFilePath) ||
@@ -49,7 +60,8 @@ public sealed class ExportPipeline
             return;
         }
 
-        var (shift, date) = ParseShiftAndDateFromShiftFileName(reportResult.ExcelFilePath);
+        var shift = ctx.Shift;
+        var date = ctx.ReportDateDdMmmYyyy;
 
         string? normalizedAttachment =
             !string.IsNullOrEmpty(reportResult.NormalizedZipPath) && File.Exists(reportResult.NormalizedZipPath)
@@ -94,35 +106,49 @@ public sealed class ExportPipeline
 
         var sent = await _emailSender.SendAsync(message, cancellationToken).ConfigureAwait(false);
         if (!sent)
+        {
             _logger.LogWarning("Combined report step finished but email was not sent successfully.");
+            await _missingFileAlerts.SendMissingFilesAlertAsync(new[]
+                {
+                    $"Scheduled combined report email failed after retries for Shift {shift}, Date {date}."
+                },
+                cancellationToken,
+                scheduledSlot: ctx).ConfigureAwait(false);
+        }
         else
             _logger.LogInformation("Combined report and email completed successfully.");
     }
 
     /// <summary>Gocator merge, then combined Excel and email in one run (used when <c>RunOnStart</c> is true). Gocator-only email is skipped so recipients get one combined mail.</summary>
-    public async Task RunFullPipelineAsync(CancellationToken cancellationToken = default)
+    public async Task RunFullPipelineAsync(ScheduledJob job, CancellationToken cancellationToken = default)
     {
         _logger.LogInformation("Running full export pipeline (Gocator merge + combined report + email).");
-        await RunGocatorMergeWithOptionalEmailAsync(sendEmailAfterMerge: false, cancellationToken).ConfigureAwait(false);
-        await RunCombinedReportAndEmailAsync(cancellationToken).ConfigureAwait(false);
+        var ctx = _scheduleCalculator.ResolveReportContext(job);
+        await RunGocatorMergeWithOptionalEmailAsync(job, sendEmailAfterMerge: false, cancellationToken, ctx).ConfigureAwait(false);
+        await RunCombinedReportAndEmailAsync(job, cancellationToken, ctx).ConfigureAwait(false);
     }
 
     public Task RunOnceAsync(CancellationToken cancellationToken = default) =>
-        RunFullPipelineAsync(cancellationToken);
+        RunFullPipelineAsync(new ScheduledJob(DateTimeOffset.UtcNow, ScheduledJobKind.FullPipeline), cancellationToken);
 
-    private async Task RunGocatorMergeWithOptionalEmailAsync(bool sendEmailAfterMerge, CancellationToken cancellationToken)
+    private async Task RunGocatorMergeWithOptionalEmailAsync(
+        ScheduledJob job,
+        bool sendEmailAfterMerge,
+        CancellationToken cancellationToken,
+        ReportSlotContext? slotContext = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         _logger.LogInformation("Running Gocator CSV merge.");
-        var path = _gocatorMerge.GenerateCombinedCsv();
+        var ctx = slotContext ?? _scheduleCalculator.ResolveReportContext(job);
+        var path = await _gocatorMerge.GenerateCombinedCsvAsync(ctx, cancellationToken).ConfigureAwait(false);
 
         if (!sendEmailAfterMerge)
             return;
 
-        await TrySendGocatorReportEmailAsync(path, cancellationToken).ConfigureAwait(false);
+        await TrySendGocatorReportEmailAsync(path, ctx, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task TrySendGocatorReportEmailAsync(string? csvPath, CancellationToken cancellationToken)
+    private async Task TrySendGocatorReportEmailAsync(string? csvPath, ReportSlotContext ctx, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(csvPath) || !File.Exists(csvPath))
         {
@@ -130,7 +156,8 @@ public sealed class ExportPipeline
             return;
         }
 
-        var (shift, date) = ParseShiftAndDateFromShiftFileName(csvPath);
+        var shift = ctx.Shift;
+        var date = ctx.ReportDateDdMmmYyyy;
 
         if (string.IsNullOrWhiteSpace(_email.FromAddress))
         {
@@ -160,31 +187,17 @@ public sealed class ExportPipeline
 
         var sent = await _emailSender.SendAsync(message, cancellationToken).ConfigureAwait(false);
         if (!sent)
+        {
             _logger.LogWarning("Gocator merge finished but Gocator email was not sent successfully.");
+            await _missingFileAlerts.SendMissingFilesAlertAsync(new[]
+                {
+                    $"Scheduled Gocator report email failed after retries for Shift {shift}, Date {date}."
+                },
+                cancellationToken,
+                scheduledSlot: ctx).ConfigureAwait(false);
+        }
         else
             _logger.LogInformation("Gocator report email sent successfully.");
-    }
-
-    /// <summary>Parses <c>...Shift_{shift}_{date}</c> from Gocator CSV or combined Excel file names.</summary>
-    private static (string shift, string date) ParseShiftAndDateFromShiftFileName(string filePath)
-    {
-        string fileName = Path.GetFileNameWithoutExtension(filePath);
-        string shift = "Unknown";
-        string date = DateTime.Now.ToString("dd-MMM-yyyy", CultureInfo.InvariantCulture);
-
-        if (fileName.Contains("Shift_", StringComparison.Ordinal))
-        {
-            int shiftIndex = fileName.IndexOf("Shift_", StringComparison.Ordinal) + 6;
-            int underscoreIndex = fileName.IndexOf('_', shiftIndex);
-            if (underscoreIndex > shiftIndex)
-                shift = fileName.Substring(shiftIndex, underscoreIndex - shiftIndex);
-
-            int lastUnderscore = fileName.LastIndexOf('_');
-            if (lastUnderscore > 0)
-                date = fileName[(lastUnderscore + 1)..];
-        }
-
-        return (shift, date);
     }
 
     private static string FormatShiftDateTemplate(string template, string shift, string date)

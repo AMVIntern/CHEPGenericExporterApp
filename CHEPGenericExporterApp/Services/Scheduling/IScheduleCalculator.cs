@@ -8,4 +8,7 @@ public interface IScheduleCalculator
 
     /// <returns>UTC instant strictly after <paramref name="afterUtc"/>.</returns>
     DateTimeOffset GetNextRunUtc(DateTimeOffset afterUtc) => GetNextScheduledJob(afterUtc).Utc;
+
+    /// <summary>Maps a fired job to the shift number and report date (local calendar day in the scheduler time zone).</summary>
+    ReportSlotContext ResolveReportContext(ScheduledJob job);
 }

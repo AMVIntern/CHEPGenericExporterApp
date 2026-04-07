@@ -18,4 +18,6 @@ public sealed class SmtpOptions
     public int TimeoutMilliseconds { get; set; } = 300_000;
     public int MaxRetryAttempts { get; set; } = 3;
     public int DelayBetweenRetriesMilliseconds { get; set; } = 5_000;
+    public bool EnableBackgroundRetryQueue { get; set; } = true;
+    public int BackgroundRetryIntervalMinutes { get; set; } = 10;
 }

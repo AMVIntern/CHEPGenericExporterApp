@@ -13,6 +13,9 @@ public sealed class EmailOptions
     public List<string> ToAddresses { get; set; } = new();
     public List<string> CcAddresses { get; set; } = new();
 
+    /// <summary>Internal recipients for missing raw CSV / input file alerts (not customer report mail).</summary>
+    public List<string> InternalAmvTeam { get; set; } = new();
+
     public string CombinedReportSubjectTemplate { get; set; } =
         "AMV Combined Report - Shift {shift} - {date}";
 

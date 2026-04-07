@@ -1,5 +1,8 @@
+using System.Text.RegularExpressions;
 using CHEPGenericExporterApp.Configuration;
 using CHEPGenericExporterApp.Models;
+using CHEPGenericExporterApp.Services.Email;
+using CHEPGenericExporterApp.Services.Scheduling;
 using Microsoft.Extensions.Options;
 using OfficeOpenXml;
 using System.Globalization;
@@ -17,13 +20,21 @@ public sealed class CombinedExcelReportService
     private readonly string _s5Folder;
     private readonly string _combinedReportFolder;
     private readonly string _siteCode;
+    private readonly IMissingFileAlertSender _missingFileAlerts;
     private readonly ILogger<CombinedExcelReportService> _logger;
+
+    /// <summary>Matches <c>...Shift_{n}_{dateSuffix}</c> at end of a report file name (date parsed loosely).</summary>
+    private static readonly Regex ShiftReportTailRegex = new(
+        @"Shift_(\d+)_(.+)$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     public CombinedExcelReportService(
         IOptions<ExportPathsOptions> pathsOptions,
         ExportPathResolver pathResolver,
+        IMissingFileAlertSender missingFileAlerts,
         ILogger<CombinedExcelReportService> logger)
     {
+        _missingFileAlerts = missingFileAlerts;
         _logger = logger;
         var o = pathsOptions.Value;
         _gocatorCombinedFolder = pathResolver.Resolve(o.GocatorCombinedFolder);
@@ -35,104 +46,124 @@ public sealed class CombinedExcelReportService
         _siteCode = string.IsNullOrWhiteSpace(o.NormalizedReportSiteCode) ? "AUB6" : o.NormalizedReportSiteCode;
     }
 
-    public CombinedReportResult? GenerateCombinedExcelReport()
+    public async Task<CombinedReportResult?> GenerateCombinedExcelReportAsync(ReportSlotContext ctx, CancellationToken cancellationToken = default)
         {
             try
             {
                 // Set EPPlus license context (required for non-commercial use)
                 ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
 
-                // Find the most recent combined Gocator CSV file
-                string gocatorCsvFile = Directory.GetFiles(_gocatorCombinedFolder, "Gocator_Report_*.csv")
-                    .OrderByDescending(f => File.GetLastWriteTime(f))
-                    .FirstOrDefault();
+                var missing = new List<string>();
 
-                if (gocatorCsvFile == null)
+                string? gocatorCsvFile = null;
+                var reportCtx = ctx;
+                var gocatorNameOk = false;
+
+                if (!Directory.Exists(_gocatorCombinedFolder))
+                    missing.Add($"Gocator combined folder missing: {_gocatorCombinedFolder}");
+                else
                 {
-                    _logger.LogWarning("No combined Gocator CSV file found in folder {Folder}.", _gocatorCombinedFolder);
-                    return null;
+                    gocatorCsvFile = Directory.GetFiles(_gocatorCombinedFolder, "Gocator_Report_*.csv")
+                        .OrderByDescending(f => File.GetLastWriteTime(f))
+                        .FirstOrDefault();
+
+                    if (gocatorCsvFile == null)
+                    {
+                        _logger.LogWarning("No merged Gocator_Report_*.csv in {Folder}.", _gocatorCombinedFolder);
+                        missing.Add($"No merged Gocator_Report_*.csv found in {_gocatorCombinedFolder}.");
+                    }
+                    else if (!TryParseReportContextFromGocatorFileName(Path.GetFileNameWithoutExtension(gocatorCsvFile), out reportCtx))
+                    {
+                        _logger.LogWarning("Gocator merged file name not recognized: {File}", Path.GetFileName(gocatorCsvFile));
+                        missing.Add(
+                            $"Merged Gocator CSV filename not recognized (expected Gocator_Report_Shift_{{n}}_{{dd-MMM-yyyy}}): {Path.GetFileName(gocatorCsvFile)}");
+                    }
+                    else
+                        gocatorNameOk = true;
                 }
 
-                _logger.LogInformation("Processing Gocator file: {File}", Path.GetFileName(gocatorCsvFile));
-
-                // Read combined Gocator CSV
-                var gocatorData = ReadCsvFile(gocatorCsvFile);
-                if (gocatorData == null || gocatorData.Rows.Count == 0)
+                CsvData? gocatorData = null;
+                if (gocatorCsvFile != null && gocatorNameOk)
                 {
-                    _logger.LogWarning("Gocator CSV file has insufficient data rows.");
-                    return null;
+                    _logger.LogInformation("Processing Gocator file: {File}", Path.GetFileName(gocatorCsvFile));
+                    gocatorData = ReadCsvFile(gocatorCsvFile);
+                    if (gocatorData == null || gocatorData.Rows.Count == 0)
+                    {
+                        _logger.LogWarning("Gocator CSV file has insufficient data rows.");
+                        missing.Add($"Merged Gocator CSV unreadable or empty: {gocatorCsvFile}");
+                    }
                 }
 
-                // Extract shift and date from filename or data
-                string shift = ExtractShiftFromFile(gocatorCsvFile, gocatorData);
-                string date = ExtractDateFromFile(gocatorCsvFile, gocatorData);
-
-                // Find corresponding S1, S2, S4 and S5 shift files
-                string s1File = FindShiftFile(_s1Folder, shift, date);
-                string s2File = FindShiftFile(_s2Folder, shift, date);
-                string s4File = FindShiftFile(_s4Folder, shift, date);
-                string s5File = FindShiftFile(_s5Folder, shift, date);
-
-                if (s1File == null && s2File == null && s4File == null && s5File == null)
+                string? s1File = null;
+                string? s2File = null;
+                string? s4File = null;
+                string? s5File = null;
+                if (gocatorNameOk)
                 {
-                    _logger.LogWarning("No shift files found for Shift {Shift} and Date {Date}.", shift, date);
-                    return null;
+                    s1File = FindShiftFileStrict(_s1Folder, reportCtx);
+                    s2File = FindShiftFileStrict(_s2Folder, reportCtx);
+                    s4File = FindShiftFileStrict(_s4Folder, reportCtx);
+                    s5File = FindShiftFileStrict(_s5Folder, reportCtx);
+
+                    AppendStationPathMissing(missing, "Station 1 (S1)", _s1Folder, s1File, reportCtx);
+                    AppendStationPathMissing(missing, "Station 2 (S2)", _s2Folder, s2File, reportCtx);
+                    AppendStationPathMissing(missing, "Station 4 (S4)", _s4Folder, s4File, reportCtx);
+                    AppendStationPathMissing(missing, "Station 5 (S5)", _s5Folder, s5File, reportCtx);
                 }
 
-                // Read shift files
-                ShiftData s1Data = null;
-                ShiftData s2Data = null;
-                ShiftData s4Data = null;
-                ShiftData s5Data = null;
+                ShiftData? s1Data = null;
+                ShiftData? s2Data = null;
+                ShiftData? s4Data = null;
+                ShiftData? s5Data = null;
 
                 if (s1File != null)
                 {
                     _logger.LogInformation("Processing S1 file: {File}", Path.GetFileName(s1File));
                     s1Data = ReadShiftFile(s1File, "S1");
+                    if (s1Data == null || s1Data.Rows.Count == 0)
+                        missing.Add($"Station 1 (S1): file unreadable or has no data rows: {s1File}");
                 }
 
                 if (s2File != null)
                 {
                     _logger.LogInformation("Processing S2 file: {File}", Path.GetFileName(s2File));
                     s2Data = ReadShiftFile(s2File, "S2");
+                    if (s2Data == null || s2Data.Rows.Count == 0)
+                        missing.Add($"Station 2 (S2): file unreadable or has no data rows: {s2File}");
                 }
 
                 if (s4File != null)
                 {
                     _logger.LogInformation("Processing S4 file: {File}", Path.GetFileName(s4File));
                     s4Data = ReadShiftFile(s4File, "S4");
+                    if (s4Data == null || s4Data.Rows.Count == 0)
+                        missing.Add($"Station 4 (S4): file unreadable or has no data rows: {s4File}");
                 }
 
                 if (s5File != null)
                 {
                     _logger.LogInformation("Processing S5 file: {File}", Path.GetFileName(s5File));
                     s5Data = ReadShiftFile(s5File, "S5");
+                    if (s5Data == null || s5Data.Rows.Count == 0)
+                        missing.Add($"Station 5 (S5): file unreadable or has no data rows: {s5File}");
                 }
 
-                // Calculate timestamps for Gocator data
-                CalculateGocatorTimestamps(gocatorData);
-
-                // Calculate timestamps for shift data
-                if (s1Data != null)
+                if (missing.Count > 0)
                 {
-                    CalculateShiftTimestamps(s1Data);
-                }
-                if (s2Data != null)
-                {
-                    CalculateShiftTimestamps(s2Data);
-                }
-                if (s4Data != null)
-                {
-                    CalculateShiftTimestamps(s4Data);
-                }
-                if (s5Data != null)
-                {
-                    CalculateShiftTimestamps(s5Data);
+                    await _missingFileAlerts.SendMissingFilesAlertAsync(missing, cancellationToken, scheduledSlot: reportCtx).ConfigureAwait(false);
+                    return null;
                 }
 
-                // Create Excel file
-                string excelFileName = Path.Combine(_combinedReportFolder, $"Combined_Report_Shift_{shift}_{date}.xlsx");
-                CreateExcelFile(excelFileName, gocatorData, s1Data, s2Data, s4Data, s5Data, out string normalizedCsvPath, out string normalizedZipPath);
+                // All inputs present — no partial report or alternate-day fallback
+                CalculateGocatorTimestamps(gocatorData!);
+                CalculateShiftTimestamps(s1Data!);
+                CalculateShiftTimestamps(s2Data!);
+                CalculateShiftTimestamps(s4Data!);
+                CalculateShiftTimestamps(s5Data!);
+
+                string excelFileName = Path.Combine(_combinedReportFolder,
+                    $"Combined_Report_Shift_{reportCtx.Shift}_{reportCtx.ReportDateDdMmmYyyy}.xlsx");
+                CreateExcelFile(excelFileName, gocatorData!, s1Data!, s2Data!, s4Data!, s5Data!, out string normalizedCsvPath, out string normalizedZipPath);
 
                 _logger.LogInformation("Combined Excel file saved to: {Path}", excelFileName);
                 if (!string.IsNullOrEmpty(normalizedCsvPath))
@@ -254,80 +285,63 @@ public sealed class CombinedExcelReportService
             }
         }
 
-        private string FindShiftFile(string folder, string shift, string date)
+        private static void AppendStationPathMissing(
+            List<string> missing,
+            string label,
+            string folder,
+            string? file,
+            ReportSlotContext ctx)
+        {
+            if (!Directory.Exists(folder))
+                missing.Add($"{label}: raw CSV folder missing ({folder}) for Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}.");
+            else if (file == null)
+                missing.Add($"{label}: no raw CSV for Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy} in {folder} (strict date in filename).");
+        }
+
+        private static bool TryParseReportContextFromGocatorFileName(string nameWithoutExt, out ReportSlotContext ctx)
+        {
+            ctx = new ReportSlotContext("0", "", DateOnly.MinValue);
+            var m = ShiftReportTailRegex.Match(nameWithoutExt);
+            if (!m.Success)
+                return false;
+
+            var shift = m.Groups[1].Value.Trim();
+            var datePart = m.Groups[2].Value.Trim();
+            if (!ReportCsvDate.TryParseLoose(datePart, out var d))
+                return false;
+
+            var dateStr = d.ToString("dd-MMM-yyyy", CultureInfo.InvariantCulture);
+            ctx = new ReportSlotContext(shift, dateStr, d);
+            return true;
+        }
+
+        private string? FindShiftFileStrict(string folder, ReportSlotContext ctx)
         {
             if (!Directory.Exists(folder))
                 return null;
 
-            // Format: S1_Report_Shift_1_28-Jan-2026.csv or S2_Report_Shift_1_28-Jan-2026.csv
-            string pattern = $"*_Report_Shift_{shift}_*.csv";
-            var files = Directory.GetFiles(folder, pattern);
-
-            // Try to match by date in filename
-            foreach (var file in files)
+            string? best = null;
+            var bestWt = DateTime.MinValue;
+            foreach (var f in Directory.GetFiles(folder, "*.csv"))
             {
-                string fileName = Path.GetFileNameWithoutExtension(file);
-                if (fileName.Contains(date, StringComparison.OrdinalIgnoreCase))
+                var name = Path.GetFileNameWithoutExtension(f);
+                var m = ShiftReportTailRegex.Match(name);
+                if (!m.Success)
+                    continue;
+                if (!ReportCsvDate.ShiftsEquivalent(m.Groups[1].Value, ctx.Shift))
+                    continue;
+                if (!ReportCsvDate.TryParseLoose(m.Groups[2].Value.Trim(), out var d) || d != ctx.ReportDate)
+                    continue;
+
+                var wt = File.GetLastWriteTime(f);
+                if (wt >= bestWt)
                 {
-                    return file;
+                    bestWt = wt;
+                    best = f;
                 }
             }
 
-            // Return first match if no date match found
-            return files.FirstOrDefault();
-        }
-
-        private string ExtractShiftFromFile(string filePath, CsvData data)
-        {
-            // Try to extract from filename first
-            string fileName = Path.GetFileNameWithoutExtension(filePath);
-            // Format: Gocator_Report_Shift_1_28-JAN-2026
-            if (fileName.Contains("Shift_"))
-            {
-                int shiftIndex = fileName.IndexOf("Shift_") + 6;
-                int underscoreIndex = fileName.IndexOf("_", shiftIndex);
-                if (underscoreIndex > shiftIndex)
-                {
-                    return fileName.Substring(shiftIndex, underscoreIndex - shiftIndex);
-                }
-            }
-
-            // Fallback: try to get from data
-            if (data != null && data.Rows.Count > 0)
-            {
-                string shiftCol = FindColumnByName(data.Headers, new[] { "shift" });
-                if (!string.IsNullOrEmpty(shiftCol) && data.Rows[0].Data.ContainsKey(shiftCol))
-                {
-                    return data.Rows[0].Data[shiftCol];
-                }
-            }
-
-            return "Unknown";
-        }
-
-        private string ExtractDateFromFile(string filePath, CsvData data)
-        {
-            // Try to extract from filename first
-            string fileName = Path.GetFileNameWithoutExtension(filePath);
-            // Format: Gocator_Report_Shift_1_28-JAN-2026
-            int lastUnderscore = fileName.LastIndexOf("_");
-            if (lastUnderscore > 0)
-            {
-                string datePart = fileName.Substring(lastUnderscore + 1);
-                return datePart;
-            }
-
-            // Fallback: try to get from data
-            if (data != null && data.Rows.Count > 0)
-            {
-                string dateCol = FindColumnByName(data.Headers, new[] { "top:date" });
-                if (!string.IsNullOrEmpty(dateCol) && data.Rows[0].Data.ContainsKey(dateCol))
-                {
-                    return data.Rows[0].Data[dateCol];
-                }
-            }
-
-            return DateTime.Now.ToString("dd-MMM-yyyy");
+            return best;
         }
 
         private string FindColumnByName(string[] headers, string[] possibleNames, bool containsMatch = false)
