@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.RegularExpressions;
 using CHEPGenericExporterApp.Configuration;
 using CHEPGenericExporterApp.Models;
 using CHEPGenericExporterApp.Services.Email;
@@ -11,6 +12,10 @@ namespace CHEPGenericExporterApp.Services;
 /// <summary>Runs Gocator CSV merge, combined Excel generation, and optional email send.</summary>
 public sealed class ExportPipeline
 {
+    private static readonly Regex ReportShiftDateInFileName = new(
+        @"_Shift_(\d+)_(.+)$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
     private readonly GocatorCsvMergeService _gocatorMerge;
     private readonly CombinedExcelReportService _excelReport;
     private readonly IEmailSender _emailSender;
@@ -57,6 +62,21 @@ public sealed class ExportPipeline
             !File.Exists(reportResult.ExcelFilePath))
         {
             _logger.LogWarning("Combined Excel report was not produced; skipping email.");
+            return;
+        }
+
+        if (!_email.BypassReportAttachmentSlotCheck &&
+            !ReportFileMatchesScheduledSlot(reportResult.ExcelFilePath, ctx))
+        {
+            _logger.LogWarning(
+                "Combined report output does not match scheduled shift/date; skipping customer email.");
+            await _missingFileAlerts.SendMissingFilesAlertAsync(
+                new[]
+                {
+                    $"Combined report is not for scheduled Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy} (file: {Path.GetFileName(reportResult.ExcelFilePath)})."
+                },
+                cancellationToken,
+                scheduledSlot: ctx).ConfigureAwait(false);
             return;
         }
 
@@ -153,6 +173,28 @@ public sealed class ExportPipeline
         if (string.IsNullOrEmpty(csvPath) || !File.Exists(csvPath))
         {
             _logger.LogWarning("Gocator CSV was not produced; skipping Gocator email.");
+            await _missingFileAlerts.SendMissingFilesAlertAsync(
+                new[]
+                {
+                    $"Gocator scheduled export: no report file for Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}."
+                },
+                cancellationToken,
+                scheduledSlot: ctx).ConfigureAwait(false);
+            return;
+        }
+
+        if (!_email.BypassReportAttachmentSlotCheck &&
+            !ReportFileMatchesScheduledSlot(csvPath, ctx))
+        {
+            _logger.LogWarning(
+                "Gocator report file does not match scheduled shift/date; skipping customer email.");
+            await _missingFileAlerts.SendMissingFilesAlertAsync(
+                new[]
+                {
+                    $"Gocator report is not for scheduled Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy} (file: {Path.GetFileName(csvPath)})."
+                },
+                cancellationToken,
+                scheduledSlot: ctx).ConfigureAwait(false);
             return;
         }
 
@@ -198,6 +240,19 @@ public sealed class ExportPipeline
         }
         else
             _logger.LogInformation("Gocator report email sent successfully.");
+    }
+
+    private static bool ReportFileMatchesScheduledSlot(string filePath, ReportSlotContext ctx)
+    {
+        var name = Path.GetFileNameWithoutExtension(filePath);
+        var m = ReportShiftDateInFileName.Match(name);
+        if (!m.Success)
+            return false;
+        if (!ReportCsvDate.ShiftsEquivalent(m.Groups[1].Value.Trim(), ctx.Shift))
+            return false;
+        if (!ReportCsvDate.TryParseLoose(m.Groups[2].Value.Trim(), out var d))
+            return false;
+        return d == ctx.ReportDate;
     }
 
     private static string FormatShiftDateTemplate(string template, string shift, string date)

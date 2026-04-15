@@ -16,6 +16,12 @@ public sealed class EmailOptions
     /// <summary>Internal recipients for missing raw CSV / input file alerts (not customer report mail).</summary>
     public List<string> InternalAmvTeam { get; set; } = new();
 
+    /// <summary>
+    /// When true, Gocator and combined customer emails are sent whenever the report file exists,
+    /// without requiring the attachment name to match the scheduled shift/date. When false, mismatches are blocked and internal alerts are sent.
+    /// </summary>
+    public bool BypassReportAttachmentSlotCheck { get; set; }
+
     public string CombinedReportSubjectTemplate { get; set; } =
         "AMV Combined Report - Shift {shift} - {date}";
 
