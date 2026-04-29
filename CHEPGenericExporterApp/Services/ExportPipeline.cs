@@ -21,6 +21,7 @@ public sealed class ExportPipeline
     private readonly IEmailSender _emailSender;
     private readonly IScheduleCalculator _scheduleCalculator;
     private readonly IMissingFileAlertSender _missingFileAlerts;
+    private readonly CsvAuditLogger _csvAuditLogger;
     private readonly EmailOptions _email;
     private readonly ILogger<ExportPipeline> _logger;
 
@@ -30,6 +31,7 @@ public sealed class ExportPipeline
         IEmailSender emailSender,
         IScheduleCalculator scheduleCalculator,
         IMissingFileAlertSender missingFileAlerts,
+        CsvAuditLogger csvAuditLogger,
         IOptions<EmailOptions> emailOptions,
         ILogger<ExportPipeline> logger)
     {
@@ -38,6 +40,7 @@ public sealed class ExportPipeline
         _emailSender = emailSender;
         _scheduleCalculator = scheduleCalculator;
         _missingFileAlerts = missingFileAlerts;
+        _csvAuditLogger = csvAuditLogger;
         _email = emailOptions.Value;
         _logger = logger;
     }
@@ -55,88 +58,8 @@ public sealed class ExportPipeline
         _logger.LogInformation("Running combined Excel report and email.");
 
         var ctx = slotContext ?? _scheduleCalculator.ResolveReportContext(job);
-        var reportResult = await _excelReport.GenerateCombinedExcelReportAsync(ctx, cancellationToken).ConfigureAwait(false);
-
-        if (reportResult == null ||
-            string.IsNullOrEmpty(reportResult.ExcelFilePath) ||
-            !File.Exists(reportResult.ExcelFilePath))
-        {
-            _logger.LogWarning("Combined Excel report was not produced; skipping email.");
-            return;
-        }
-
-        if (!_email.BypassReportAttachmentSlotCheck &&
-            !ReportFileMatchesScheduledSlot(reportResult.ExcelFilePath, ctx))
-        {
-            _logger.LogWarning(
-                "Combined report output does not match scheduled shift/date; skipping customer email.");
-            await _missingFileAlerts.SendMissingFilesAlertAsync(
-                new[]
-                {
-                    $"Combined report is not for scheduled Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy} (file: {Path.GetFileName(reportResult.ExcelFilePath)})."
-                },
-                cancellationToken,
-                scheduledSlot: ctx).ConfigureAwait(false);
-            return;
-        }
-
-        var shift = ctx.Shift;
-        var date = ctx.ReportDateDdMmmYyyy;
-
-        string? normalizedAttachment =
-            !string.IsNullOrEmpty(reportResult.NormalizedZipPath) && File.Exists(reportResult.NormalizedZipPath)
-                ? reportResult.NormalizedZipPath
-                : (!string.IsNullOrEmpty(reportResult.NormalizedCsvPath) && File.Exists(reportResult.NormalizedCsvPath)
-                    ? reportResult.NormalizedCsvPath
-                    : null);
-
-        var additional = normalizedAttachment != null
-            ? (IReadOnlyList<string>?)new List<string> { normalizedAttachment }
-            : null;
-
-        string bodyTemplate = additional != null
-            ? _email.CombinedReportBodyWithZip
-            : _email.CombinedReportBodyWithoutZip;
-
-        var subject = FormatShiftDateTemplate(_email.CombinedReportSubjectTemplate, shift, date);
-        var body = FormatShiftDateTemplate(bodyTemplate, shift, date);
-
-        if (string.IsNullOrWhiteSpace(_email.FromAddress))
-        {
-            _logger.LogWarning("Email FromAddress is not configured; skipping send.");
-            return;
-        }
-
-        if (_email.ToAddresses == null || _email.ToAddresses.Count == 0)
-        {
-            _logger.LogWarning("No ToAddresses configured; skipping send.");
-            return;
-        }
-
-        var message = new OutgoingEmail
-        {
-            From = _email.FromAddress,
-            To = _email.ToAddresses,
-            Cc = _email.CcAddresses is { Count: > 0 } ? _email.CcAddresses : null,
-            Subject = subject,
-            Body = body,
-            PrimaryAttachmentPath = reportResult.ExcelFilePath,
-            AdditionalAttachmentPaths = additional
-        };
-
-        var sent = await _emailSender.SendAsync(message, cancellationToken).ConfigureAwait(false);
-        if (!sent)
-        {
-            _logger.LogWarning("Combined report step finished but email was not sent successfully.");
-            await _missingFileAlerts.SendMissingFilesAlertAsync(new[]
-                {
-                    $"Scheduled combined report email failed after retries for Shift {shift}, Date {date}."
-                },
-                cancellationToken,
-                scheduledSlot: ctx).ConfigureAwait(false);
-        }
-        else
-            _logger.LogInformation("Combined report and email completed successfully.");
+        _csvAuditLogger.EnsureRow(ctx.Shift, ctx.ReportDate);
+        await TrySendCombinedReportEmailAsync(ctx, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Gocator merge, then combined Excel and email in one run (used when <c>RunOnStart</c> is true). Gocator-only email is skipped so recipients get one combined mail.</summary>
@@ -160,6 +83,7 @@ public sealed class ExportPipeline
         cancellationToken.ThrowIfCancellationRequested();
         _logger.LogInformation("Running Gocator CSV merge.");
         var ctx = slotContext ?? _scheduleCalculator.ResolveReportContext(job);
+        _csvAuditLogger.EnsureRow(ctx.Shift, ctx.ReportDate);
         var path = await _gocatorMerge.GenerateCombinedCsvAsync(ctx, cancellationToken).ConfigureAwait(false);
 
         if (!sendEmailAfterMerge)
@@ -168,7 +92,23 @@ public sealed class ExportPipeline
         await TrySendGocatorReportEmailAsync(path, ctx, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task TrySendGocatorReportEmailAsync(string? csvPath, ReportSlotContext ctx, CancellationToken cancellationToken)
+    public async Task<bool> TryRecoverGocatorEmailAsync(
+        ReportSlotContext ctx,
+        CancellationToken cancellationToken = default,
+        DateTime? targetDate = null)
+    {
+        _csvAuditLogger.EnsureRow(ctx.Shift, ctx.ReportDate);
+        var path = await _gocatorMerge.GenerateCombinedCsvAsync(ctx, cancellationToken, targetDate).ConfigureAwait(false);
+        return await TrySendGocatorReportEmailAsync(path, ctx, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<bool> TryRecoverCombinedEmailAsync(ReportSlotContext ctx, CancellationToken cancellationToken = default)
+    {
+        _csvAuditLogger.EnsureRow(ctx.Shift, ctx.ReportDate);
+        return await TrySendCombinedReportEmailAsync(ctx, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<bool> TrySendGocatorReportEmailAsync(string? csvPath, ReportSlotContext ctx, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(csvPath) || !File.Exists(csvPath))
         {
@@ -180,7 +120,7 @@ public sealed class ExportPipeline
                 },
                 cancellationToken,
                 scheduledSlot: ctx).ConfigureAwait(false);
-            return;
+            return false;
         }
 
         if (!_email.BypassReportAttachmentSlotCheck &&
@@ -195,7 +135,7 @@ public sealed class ExportPipeline
                 },
                 cancellationToken,
                 scheduledSlot: ctx).ConfigureAwait(false);
-            return;
+            return false;
         }
 
         var shift = ctx.Shift;
@@ -204,13 +144,13 @@ public sealed class ExportPipeline
         if (string.IsNullOrWhiteSpace(_email.FromAddress))
         {
             _logger.LogWarning("Email FromAddress is not configured; skipping Gocator email.");
-            return;
+            return false;
         }
 
         if (_email.ToAddresses == null || _email.ToAddresses.Count == 0)
         {
             _logger.LogWarning("No ToAddresses configured; skipping Gocator email.");
-            return;
+            return false;
         }
 
         var subject = FormatShiftDateTemplate(_email.GocatorReportSubjectTemplate, shift, date);
@@ -237,9 +177,103 @@ public sealed class ExportPipeline
                 },
                 cancellationToken,
                 scheduledSlot: ctx).ConfigureAwait(false);
+            return false;
         }
         else
+        {
             _logger.LogInformation("Gocator report email sent successfully.");
+            _csvAuditLogger.MarkGocatorSent(ctx.Shift, ctx.ReportDate);
+            return true;
+        }
+    }
+
+    private async Task<bool> TrySendCombinedReportEmailAsync(ReportSlotContext ctx, CancellationToken cancellationToken)
+    {
+        var reportResult = await _excelReport.GenerateCombinedExcelReportAsync(ctx, cancellationToken).ConfigureAwait(false);
+
+        if (reportResult == null ||
+            string.IsNullOrEmpty(reportResult.ExcelFilePath) ||
+            !File.Exists(reportResult.ExcelFilePath))
+        {
+            _logger.LogWarning("Combined Excel report was not produced; skipping email.");
+            return false;
+        }
+
+        if (!_email.BypassReportAttachmentSlotCheck &&
+            !ReportFileMatchesScheduledSlot(reportResult.ExcelFilePath, ctx))
+        {
+            _logger.LogWarning(
+                "Combined report output does not match scheduled shift/date; skipping customer email.");
+            await _missingFileAlerts.SendMissingFilesAlertAsync(
+                new[]
+                {
+                    $"Combined report is not for scheduled Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy} (file: {Path.GetFileName(reportResult.ExcelFilePath)})."
+                },
+                cancellationToken,
+                scheduledSlot: ctx).ConfigureAwait(false);
+            return false;
+        }
+
+        var shift = ctx.Shift;
+        var date = ctx.ReportDateDdMmmYyyy;
+
+        string? normalizedAttachment =
+            !string.IsNullOrEmpty(reportResult.NormalizedZipPath) && File.Exists(reportResult.NormalizedZipPath)
+                ? reportResult.NormalizedZipPath
+                : (!string.IsNullOrEmpty(reportResult.NormalizedCsvPath) && File.Exists(reportResult.NormalizedCsvPath)
+                    ? reportResult.NormalizedCsvPath
+                    : null);
+
+        var additional = normalizedAttachment != null
+            ? (IReadOnlyList<string>?)new List<string> { normalizedAttachment }
+            : null;
+
+        string bodyTemplate = additional != null
+            ? _email.CombinedReportBodyWithZip
+            : _email.CombinedReportBodyWithoutZip;
+
+        var subject = FormatShiftDateTemplate(_email.CombinedReportSubjectTemplate, shift, date);
+        var body = FormatShiftDateTemplate(bodyTemplate, shift, date);
+
+        if (string.IsNullOrWhiteSpace(_email.FromAddress))
+        {
+            _logger.LogWarning("Email FromAddress is not configured; skipping send.");
+            return false;
+        }
+
+        if (_email.ToAddresses == null || _email.ToAddresses.Count == 0)
+        {
+            _logger.LogWarning("No ToAddresses configured; skipping send.");
+            return false;
+        }
+
+        var message = new OutgoingEmail
+        {
+            From = _email.FromAddress,
+            To = _email.ToAddresses,
+            Cc = _email.CcAddresses is { Count: > 0 } ? _email.CcAddresses : null,
+            Subject = subject,
+            Body = body,
+            PrimaryAttachmentPath = reportResult.ExcelFilePath,
+            AdditionalAttachmentPaths = additional
+        };
+
+        var sent = await _emailSender.SendAsync(message, cancellationToken).ConfigureAwait(false);
+        if (!sent)
+        {
+            _logger.LogWarning("Combined report step finished but email was not sent successfully.");
+            await _missingFileAlerts.SendMissingFilesAlertAsync(new[]
+                {
+                    $"Scheduled combined report email failed after retries for Shift {shift}, Date {date}."
+                },
+                cancellationToken,
+                scheduledSlot: ctx).ConfigureAwait(false);
+            return false;
+        }
+
+        _logger.LogInformation("Combined report and email completed successfully.");
+        _csvAuditLogger.MarkCombinedSent(ctx.Shift, ctx.ReportDate);
+        return true;
     }
 
     private static bool ReportFileMatchesScheduledSlot(string filePath, ReportSlotContext ctx)

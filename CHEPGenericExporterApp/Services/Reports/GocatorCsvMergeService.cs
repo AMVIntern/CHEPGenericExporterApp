@@ -31,7 +31,10 @@ public sealed class GocatorCsvMergeService
     /// Merges latest Top/Bottom *values* CSVs (by last write time), matches rows within 1.5s, writes
     /// <c>Gocator_Report_Shift_{shift}_{date}.csv</c> using shift/date from the first merged row (same as GocatorShiftExportApp).
     /// </summary>
-    public async Task<string?> GenerateCombinedCsvAsync(ReportSlotContext slot, CancellationToken cancellationToken = default)
+    public async Task<string?> GenerateCombinedCsvAsync(
+        ReportSlotContext slot,
+        CancellationToken cancellationToken = default,
+        DateTime? targetDate = null)
     {
         try
         {
@@ -45,7 +48,7 @@ public sealed class GocatorCsvMergeService
 
             if (!Directory.Exists(topFolder))
                 missing.Add($"Top Gocator folder missing: {topFolder}");
-            else if (FindLatestValuesCsv(topFolder) == null)
+            else if (FindLatestValuesCsv(topFolder, targetDate, slot.Shift) == null)
             {
                 _logger.LogWarning("No CSV file containing 'values' found in Top folder {Folder}.", topFolder);
                 missing.Add($"No CSV file containing 'values' found in Top folder: {topFolder}");
@@ -53,7 +56,7 @@ public sealed class GocatorCsvMergeService
 
             if (!Directory.Exists(bottomFolder))
                 missing.Add($"Bottom Gocator folder missing: {bottomFolder}");
-            else if (FindLatestValuesCsv(bottomFolder) == null)
+            else if (FindLatestValuesCsv(bottomFolder, targetDate, slot.Shift) == null)
             {
                 _logger.LogWarning("No CSV file containing 'values' found in Bottom folder {Folder}.", bottomFolder);
                 missing.Add($"No CSV file containing 'values' found in Bottom folder: {bottomFolder}");
@@ -65,8 +68,8 @@ public sealed class GocatorCsvMergeService
                 return null;
             }
 
-            var topFile = FindLatestValuesCsv(topFolder)!;
-            var bottomFile = FindLatestValuesCsv(bottomFolder)!;
+            var topFile = FindLatestValuesCsv(topFolder, targetDate, slot.Shift)!;
+            var bottomFile = FindLatestValuesCsv(bottomFolder, targetDate, slot.Shift)!;
 
             var topData = ReadCsvFile(topFile, "Top");
             if (topData == null || topData.Rows.Count == 0)
@@ -221,13 +224,64 @@ public sealed class GocatorCsvMergeService
         }
     }
 
-    private static string? FindLatestValuesCsv(string folder)
+    private static string? FindLatestValuesCsv(string folder, DateTime? targetDate = null, string? targetShift = null)
     {
         if (!Directory.Exists(folder))
             return null;
 
-        return Directory.GetFiles(folder, "*.csv")
-            .Where(f => Path.GetFileName(f).ToLowerInvariant().Contains("values"))
+        var valuesFiles = Directory.GetFiles(folder, "*.csv")
+            .Where(f => Path.GetFileName(f).ToLowerInvariant().Contains("values"));
+
+        // Keep existing last-modified behavior intact for normal scheduled flow.
+        if (!targetDate.HasValue)
+        {
+            return valuesFiles
+                .OrderByDescending(f => File.GetLastWriteTime(f))
+                .FirstOrDefault();
+        }
+
+        var tokenCandidates = new[]
+        {
+            targetDate.Value.ToString("dd-MMM-yyyy", CultureInfo.InvariantCulture),
+            targetDate.Value.ToString("d-MMM-yyyy", CultureInfo.InvariantCulture),
+            targetDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            targetDate.Value.ToString("dd-MM-yyyy", CultureInfo.InvariantCulture),
+            targetDate.Value.ToString("yyyyMMdd", CultureInfo.InvariantCulture),
+            targetDate.Value.ToString("ddMMyyyy", CultureInfo.InvariantCulture)
+        };
+
+        var dateMatches = valuesFiles
+            .Where(f =>
+            {
+                var name = Path.GetFileNameWithoutExtension(f);
+                return tokenCandidates.Any(token => name.Contains(token, StringComparison.OrdinalIgnoreCase));
+            });
+
+        if (int.TryParse(targetShift, NumberStyles.Integer, CultureInfo.InvariantCulture, out var shiftNo))
+        {
+            var shiftTokens = new[]
+            {
+                $"shift_{shiftNo}",
+                $"shift-{shiftNo}",
+                $"shift{shiftNo}",
+                $"s{shiftNo}_",
+                $"_s{shiftNo}"
+            };
+
+            var dateAndShiftMatch = dateMatches
+                .Where(f =>
+                {
+                    var name = Path.GetFileNameWithoutExtension(f);
+                    return shiftTokens.Any(token => name.Contains(token, StringComparison.OrdinalIgnoreCase));
+                })
+                .OrderByDescending(f => File.GetLastWriteTime(f))
+                .FirstOrDefault();
+
+            if (!string.IsNullOrEmpty(dateAndShiftMatch))
+                return dateAndShiftMatch;
+        }
+
+        return dateMatches
             .OrderByDescending(f => File.GetLastWriteTime(f))
             .FirstOrDefault();
     }

@@ -10,17 +10,20 @@ public sealed class ScheduledExportWorker : BackgroundService
 {
     private readonly IScheduleCalculator _scheduleCalculator;
     private readonly ExportPipeline _pipeline;
+    private readonly CsvAuditLogger _csvAuditLogger;
     private readonly IOptions<SchedulerOptions> _schedulerOptions;
     private readonly ILogger<ScheduledExportWorker> _logger;
 
     public ScheduledExportWorker(
         IScheduleCalculator scheduleCalculator,
         ExportPipeline pipeline,
+        CsvAuditLogger csvAuditLogger,
         IOptions<SchedulerOptions> schedulerOptions,
         ILogger<ScheduledExportWorker> logger)
     {
         _scheduleCalculator = scheduleCalculator;
         _pipeline = pipeline;
+        _csvAuditLogger = csvAuditLogger;
         _schedulerOptions = schedulerOptions;
         _logger = logger;
     }
@@ -29,6 +32,7 @@ public sealed class ScheduledExportWorker : BackgroundService
     {
         var opts = _schedulerOptions.Value;
         var useImmediateFirstRun = opts.RunOnStart;
+        EnsureAuditRowForNextUpcomingShift();
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -43,6 +47,7 @@ public sealed class ScheduledExportWorker : BackgroundService
             {
                 var after = DateTimeOffset.UtcNow;
                 nextJob = _scheduleCalculator.GetNextScheduledJob(after);
+                EnsureAuditRow(nextJob);
                 var delay = nextJob.Utc - DateTimeOffset.UtcNow;
                 if (delay > TimeSpan.Zero)
                 {
@@ -71,6 +76,25 @@ public sealed class ScheduledExportWorker : BackgroundService
                 _logger.LogError(ex, "Unhandled error during scheduled job {Job}.", nextJob.Kind);
             }
         }
+    }
+
+    private void EnsureAuditRowForNextUpcomingShift()
+    {
+        try
+        {
+            var next = _scheduleCalculator.GetNextScheduledJob(DateTimeOffset.UtcNow);
+            EnsureAuditRow(next);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not ensure startup audit row for next scheduled shift.");
+        }
+    }
+
+    private void EnsureAuditRow(ScheduledJob job)
+    {
+        var context = _scheduleCalculator.ResolveReportContext(job);
+        _csvAuditLogger.EnsureRow(context.Shift, context.ReportDate);
     }
 
     private async Task RunJobAsync(ScheduledJob job, CancellationToken stoppingToken)

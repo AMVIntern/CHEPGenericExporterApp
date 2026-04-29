@@ -6,9 +6,6 @@ namespace CHEPGenericExporterApp.Services.Scheduling;
 
 public sealed class ScheduleCalculator : IScheduleCalculator
 {
-    private static readonly TimeSpan[] DefaultGocatorTimes = [new(6, 0, 0), new(14, 0, 0), new(22, 0, 0)];
-    private static readonly TimeSpan[] DefaultCombinedTimes = [new(6, 2, 0), new(14, 2, 0), new(22, 2, 0)];
-
     private readonly SchedulerOptions _options;
     private readonly TimeZoneInfo _timeZone;
     private readonly TimeSpan[] _gocatorSlots;
@@ -19,8 +16,8 @@ public sealed class ScheduleCalculator : IScheduleCalculator
         _options = options.Value ?? throw new ArgumentNullException(nameof(options));
         _timeZone = ResolveTimeZone(_options.TimeZoneId);
 
-        _gocatorSlots = ParseTimeList(_options.GocatorTimes, DefaultGocatorTimes);
-        _combinedSlots = ParseTimeList(_options.CombinedTimes, DefaultCombinedTimes);
+        _gocatorSlots = ParseTimeList(_options.GocatorTimes, "Scheduler:GocatorTimes");
+        _combinedSlots = ParseTimeList(_options.CombinedTimes, "Scheduler:CombinedTimes");
 
         if (_gocatorSlots.Length != _combinedSlots.Length)
             throw new InvalidOperationException("Scheduler: GocatorTimes and CombinedTimes must have the same number of entries.");
@@ -46,29 +43,10 @@ public sealed class ScheduleCalculator : IScheduleCalculator
         if (idx < 0)
             idx = FindClosestSlotIndex(local, slots);
 
-        // CHEP three-run day (06:00, 14:00, 22:00 in config order): see MapChepThreeSlotToShiftAndDate.
-        var (shift, reportDate) = MapChepThreeSlotToShiftAndDate(idx, dateOnly);
+        var (shift, reportDate) = MapShiftAndDate(idx, dateOnly);
 
         var dateStr = reportDate.ToString("dd-MMM-yyyy", CultureInfo.InvariantCulture);
         return new ReportSlotContext(shift, dateStr, reportDate);
-    }
-
-    /// <summary>
-    /// When exactly three schedule pairs exist (typical 6 / 14 / 22): first run → Shift 3, previous day;
-    /// second → Shift 1, same day; third → Shift 2, same day. Otherwise falls back to slot index + 1 and job date.
-    /// </summary>
-    private (string Shift, DateOnly ReportDate) MapChepThreeSlotToShiftAndDate(int slotIndex, DateOnly jobLocalDate)
-    {
-        if (_gocatorSlots.Length != 3)
-            return ((slotIndex + 1).ToString(CultureInfo.InvariantCulture), jobLocalDate);
-
-        return slotIndex switch
-        {
-            0 => ("3", jobLocalDate.AddDays(-1)),
-            1 => ("1", jobLocalDate),
-            2 => ("2", jobLocalDate),
-            _ => ((slotIndex + 1).ToString(CultureInfo.InvariantCulture), jobLocalDate),
-        };
     }
 
     private static int FindMatchingSlotIndex(DateTime local, TimeSpan[] slots, double toleranceMinutes)
@@ -100,6 +78,26 @@ public sealed class ScheduleCalculator : IScheduleCalculator
         }
 
         return best;
+    }
+
+    private (string Shift, DateOnly ReportDate) MapShiftAndDate(int slotIndex, DateOnly jobLocalDate)
+    {
+        // CHEP shift numbering for 3 slots:
+        // first slot (typically 06:xx) belongs to Shift 3 of previous date.
+        // second slot (typically 14:xx) is Shift 1 of same date.
+        // third slot (typically 22:xx) is Shift 2 of same date.
+        if (_gocatorSlots.Length == 3)
+        {
+            return slotIndex switch
+            {
+                0 => ("3", jobLocalDate.AddDays(-1)),
+                1 => ("1", jobLocalDate),
+                2 => ("2", jobLocalDate),
+                _ => ((slotIndex + 1).ToString(CultureInfo.InvariantCulture), jobLocalDate)
+            };
+        }
+
+        return ((slotIndex + 1).ToString(CultureInfo.InvariantCulture), jobLocalDate);
     }
 
     /// <summary>Saturday skipped. Sunday: last slot pair only. Mon–Fri: all pairs (Gocator then combined).</summary>
@@ -184,10 +182,10 @@ public sealed class ScheduleCalculator : IScheduleCalculator
         }
     }
 
-    private static TimeSpan[] ParseTimeList(List<string>? list, TimeSpan[] defaults)
+    private static TimeSpan[] ParseTimeList(List<string>? list, string settingName)
     {
         if (list == null || list.Count == 0)
-            return defaults;
+            throw new InvalidOperationException($"{settingName} is required and must contain at least one time entry.");
         return list.Select(ParseTimeOfDay).ToArray();
     }
 

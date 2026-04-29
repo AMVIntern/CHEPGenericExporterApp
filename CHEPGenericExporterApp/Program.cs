@@ -25,8 +25,10 @@ builder.Services.AddSingleton<IEmailSender, ReliableEmailSender>();
 builder.Services.AddSingleton<IMissingFileAlertSender, MissingFileAlertSender>();
 builder.Services.AddSingleton<GocatorCsvMergeService>();
 builder.Services.AddSingleton<CombinedExcelReportService>();
+builder.Services.AddSingleton<CsvAuditLogger>();
 builder.Services.AddSingleton<ExportPipeline>();
 builder.Services.AddHostedService<ScheduledExportWorker>();
+builder.Services.AddHostedService<MissedEmailRecoveryWorker>();
 builder.Services.AddHostedService<EmailRetryWorker>();
 
 var host = builder.Build();

@@ -9,8 +9,8 @@ public sealed class SchedulerOptions
     public string TimeZoneId { get; set; } = "Local";
 
     /// <summary>
-    /// Wall times for Gocator CSV merge (default 06:00, 14:00, 22:00). With exactly three entries, order must stay
-    /// morning → afternoon → evening: 06:00 maps to Shift 3 / previous calendar day; 14:00 → Shift 1 / same day; 22:00 → Shift 2 / same day.
+    /// Wall times for Gocator CSV merge (default 06:00, 14:00, 22:00).
+    /// Index 0 maps to Shift 1, index 1 to Shift 2, index 2 to Shift 3.
     /// </summary>
     public List<string>? GocatorTimes { get; set; }
 
