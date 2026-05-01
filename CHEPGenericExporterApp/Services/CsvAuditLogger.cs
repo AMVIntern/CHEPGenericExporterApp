@@ -6,9 +6,14 @@ namespace CHEPGenericExporterApp.Services;
 
 public sealed class CsvAuditLogger
 {
-    private const string Header = "Shift,Date,GocatorReportSent,CombinedReportSent,LastAttemptUtc";
-    private static readonly string[] ExpectedHeader =
+    private const string Header =
+        "Shift,Date,GocatorReportSent,CombinedReportSent,LastAttemptUtc,MissingAlertCount,MissingAlertFinalized";
+
+    private static readonly string[] ExpectedHeaderLegacy =
         ["Shift", "Date", "GocatorReportSent", "CombinedReportSent", "LastAttemptUtc"];
+
+    private static readonly string[] ExpectedHeaderFull =
+        ["Shift", "Date", "GocatorReportSent", "CombinedReportSent", "LastAttemptUtc", "MissingAlertCount", "MissingAlertFinalized"];
 
     private readonly string _logFilePath;
     private readonly object _sync = new();
@@ -50,7 +55,7 @@ public sealed class CsvAuditLogger
             if (rows.Any(r => r.Shift == normalizedShift && r.Date == date))
                 return;
 
-            rows.Add(new CsvAuditRow(normalizedShift, date, false, false, null));
+            rows.Add(new CsvAuditRow(normalizedShift, date, false, false, null, 0, false));
             WriteAllRowsNoLock(rows);
         }
     }
@@ -68,6 +73,55 @@ public sealed class CsvAuditLogger
     public void MarkAttempt(string shift, DateOnly date)
     {
         UpdateRow(shift, date, (row, now) => row with { LastAttemptUtc = now });
+    }
+
+    /// <summary>Whether a missing-input-file alert may still be sent: true while <c>MissingAlertCount</c> is below <paramref name="maxAlerts"/> and the row is not finalized.</summary>
+    public bool CanSendMissingFileAlert(string shift, DateOnly date, int maxAlerts)
+    {
+        if (maxAlerts <= 0)
+            return true;
+
+        var normalizedShift = NormalizeShift(shift);
+        lock (_sync)
+        {
+            var rows = ReadAllRowsNoLock();
+            var row = rows.FirstOrDefault(r => r.Shift == normalizedShift && r.Date == date);
+            if (row.Shift is null)
+                return true;
+
+            return !row.MissingAlertFinalized && row.MissingAlertCount < maxAlerts;
+        }
+    }
+
+    /// <summary>Call after a missing-file alert was delivered successfully: increments <c>MissingAlertCount</c>; sets <c>MissingAlertFinalized</c> when count reaches <paramref name="maxAlerts"/> (same value as Email:MaxMissingFileAlertsPerShiftDate).</summary>
+    public void RecordMissingFileAlertSent(string shift, DateOnly date, int maxAlerts)
+    {
+        if (maxAlerts <= 0)
+            return;
+
+        var normalizedShift = NormalizeShift(shift);
+        lock (_sync)
+        {
+            var rows = ReadAllRowsNoLock();
+            var index = rows.FindIndex(r => r.Shift == normalizedShift && r.Date == date);
+            if (index < 0)
+            {
+                var newCount = 1;
+                rows.Add(new CsvAuditRow(normalizedShift, date, false, false, null, newCount, newCount >= maxAlerts));
+            }
+            else
+            {
+                var row = rows[index];
+                var newCount = row.MissingAlertCount + 1;
+                rows[index] = row with
+                {
+                    MissingAlertCount = newCount,
+                    MissingAlertFinalized = newCount >= maxAlerts
+                };
+            }
+
+            WriteAllRowsNoLock(rows);
+        }
     }
 
     public IReadOnlyList<CsvAuditRow> GetPendingRows()
@@ -111,12 +165,14 @@ public sealed class CsvAuditLogger
         if (lines.Length == 0)
             return [];
 
-        var firstColumns = lines[0].Split(',', StringSplitOptions.None);
-        if (firstColumns.Length != ExpectedHeader.Length ||
-            firstColumns.Where((t, i) => !string.Equals(t.Trim(), ExpectedHeader[i], StringComparison.Ordinal)).Any())
+        var headerCols = lines[0].Split(',', StringSplitOptions.None);
+        var extended = HeaderMatches(headerCols, ExpectedHeaderFull);
+        var legacy = HeaderMatches(headerCols, ExpectedHeaderLegacy);
+
+        if (!extended && !legacy)
         {
             throw new InvalidOperationException(
-                $"CSV header in '{_logFilePath}' is invalid. Expected: {Header}");
+                $"CSV header in '{_logFilePath}' is invalid. Expected legacy ({string.Join(",", ExpectedHeaderLegacy)}) or full ({string.Join(",", ExpectedHeaderFull)}).");
         }
 
         var rows = new List<CsvAuditRow>();
@@ -127,7 +183,7 @@ public sealed class CsvAuditLogger
                 continue;
 
             var columns = line.Split(',', StringSplitOptions.None);
-            if (columns.Length < 5)
+            if (columns.Length < ExpectedHeaderLegacy.Length)
                 continue;
 
             var shift = NormalizeShift(columns[0]);
@@ -145,7 +201,15 @@ public sealed class CsvAuditLogger
                 lastAttemptUtc = parsed.ToUniversalTime();
             }
 
-            rows.Add(new CsvAuditRow(shift, date, gocatorSent, combinedSent, lastAttemptUtc));
+            var missingCount = 0;
+            var missingFinalized = false;
+            if (extended && columns.Length >= ExpectedHeaderFull.Length)
+            {
+                _ = int.TryParse(columns[5].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out missingCount);
+                missingFinalized = bool.TryParse(columns[6].Trim(), out var mf) && mf;
+            }
+
+            rows.Add(new CsvAuditRow(shift, date, gocatorSent, combinedSent, lastAttemptUtc, missingCount, missingFinalized));
         }
 
         return rows;
@@ -161,7 +225,9 @@ public sealed class CsvAuditLogger
                 row.Date.ToString("dd-MMM-yyyy", CultureInfo.InvariantCulture),
                 row.GocatorReportSent ? "true" : "false",
                 row.CombinedReportSent ? "true" : "false",
-                row.LastAttemptUtc?.ToString("O", CultureInfo.InvariantCulture) ?? string.Empty));
+                row.LastAttemptUtc?.ToString("O", CultureInfo.InvariantCulture) ?? string.Empty,
+                row.MissingAlertCount.ToString(CultureInfo.InvariantCulture),
+                row.MissingAlertFinalized ? "true" : "false"));
         }
 
         File.WriteAllLines(_logFilePath, lines, Encoding.UTF8);
@@ -178,6 +244,19 @@ public sealed class CsvAuditLogger
 
         return shiftNumber.ToString(CultureInfo.InvariantCulture);
     }
+
+    private static bool HeaderMatches(string[] columns, string[] expected)
+    {
+        if (columns.Length != expected.Length)
+            return false;
+        for (var i = 0; i < expected.Length; i++)
+        {
+            if (!string.Equals(columns[i].Trim(), expected[i], StringComparison.Ordinal))
+                return false;
+        }
+
+        return true;
+    }
 }
 
 public readonly record struct CsvAuditRow(
@@ -185,4 +264,6 @@ public readonly record struct CsvAuditRow(
     DateOnly Date,
     bool GocatorReportSent,
     bool CombinedReportSent,
-    DateTimeOffset? LastAttemptUtc);
+    DateTimeOffset? LastAttemptUtc,
+    int MissingAlertCount,
+    bool MissingAlertFinalized);
