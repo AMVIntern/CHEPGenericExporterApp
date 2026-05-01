@@ -21,6 +21,7 @@ public sealed class ExportPipeline
     private readonly IEmailSender _emailSender;
     private readonly IScheduleCalculator _scheduleCalculator;
     private readonly IMissingFileAlertSender _missingFileAlerts;
+    private readonly IMissingFileSlottedAlertCoordinator _slottedMissingFileAlerts;
     private readonly CsvAuditLogger _csvAuditLogger;
     private readonly EmailOptions _email;
     private readonly ILogger<ExportPipeline> _logger;
@@ -31,6 +32,7 @@ public sealed class ExportPipeline
         IEmailSender emailSender,
         IScheduleCalculator scheduleCalculator,
         IMissingFileAlertSender missingFileAlerts,
+        IMissingFileSlottedAlertCoordinator slottedMissingFileAlerts,
         CsvAuditLogger csvAuditLogger,
         IOptions<EmailOptions> emailOptions,
         ILogger<ExportPipeline> logger)
@@ -40,6 +42,7 @@ public sealed class ExportPipeline
         _emailSender = emailSender;
         _scheduleCalculator = scheduleCalculator;
         _missingFileAlerts = missingFileAlerts;
+        _slottedMissingFileAlerts = slottedMissingFileAlerts;
         _csvAuditLogger = csvAuditLogger;
         _email = emailOptions.Value;
         _logger = logger;
@@ -67,8 +70,11 @@ public sealed class ExportPipeline
     {
         _logger.LogInformation("Running full export pipeline (Gocator merge + combined report + email).");
         var ctx = _scheduleCalculator.ResolveReportContext(job);
-        await RunGocatorMergeWithOptionalEmailAsync(job, sendEmailAfterMerge: false, cancellationToken, ctx).ConfigureAwait(false);
-        await RunCombinedReportAndEmailAsync(job, cancellationToken, ctx).ConfigureAwait(false);
+        await using (_slottedMissingFileAlerts.BeginSlottedBatch(ctx, applyPerSlotMissingAlertLimit: true, cancellationToken))
+        {
+            await RunGocatorMergeWithOptionalEmailAsync(job, sendEmailAfterMerge: false, cancellationToken, ctx).ConfigureAwait(false);
+            await RunCombinedReportAndEmailAsync(job, cancellationToken, ctx).ConfigureAwait(false);
+        }
     }
 
     public Task RunOnceAsync(CancellationToken cancellationToken = default) =>
@@ -84,12 +90,13 @@ public sealed class ExportPipeline
         _logger.LogInformation("Running Gocator CSV merge.");
         var ctx = slotContext ?? _scheduleCalculator.ResolveReportContext(job);
         _csvAuditLogger.EnsureRow(ctx.Shift, ctx.ReportDate);
-        var path = await _gocatorMerge.GenerateCombinedCsvAsync(ctx, cancellationToken).ConfigureAwait(false);
+        var merge = await _gocatorMerge.GenerateCombinedCsvAsync(ctx, cancellationToken).ConfigureAwait(false);
 
         if (!sendEmailAfterMerge)
             return;
 
-        await TrySendGocatorReportEmailAsync(path, ctx, cancellationToken).ConfigureAwait(false);
+        await TrySendGocatorReportEmailAsync(merge.CombinedCsvPath, ctx, cancellationToken, merge.SentSlottedMissingFileAlert)
+            .ConfigureAwait(false);
     }
 
     public async Task<bool> TryRecoverGocatorEmailAsync(
@@ -98,8 +105,9 @@ public sealed class ExportPipeline
         DateTime? targetDate = null)
     {
         _csvAuditLogger.EnsureRow(ctx.Shift, ctx.ReportDate);
-        var path = await _gocatorMerge.GenerateCombinedCsvAsync(ctx, cancellationToken, targetDate).ConfigureAwait(false);
-        return await TrySendGocatorReportEmailAsync(path, ctx, cancellationToken).ConfigureAwait(false);
+        var merge = await _gocatorMerge.GenerateCombinedCsvAsync(ctx, cancellationToken, targetDate).ConfigureAwait(false);
+        return await TrySendGocatorReportEmailAsync(merge.CombinedCsvPath, ctx, cancellationToken, merge.SentSlottedMissingFileAlert)
+            .ConfigureAwait(false);
     }
 
     public async Task<bool> TryRecoverCombinedEmailAsync(ReportSlotContext ctx, CancellationToken cancellationToken = default)
@@ -108,18 +116,29 @@ public sealed class ExportPipeline
         return await TrySendCombinedReportEmailAsync(ctx, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<bool> TrySendGocatorReportEmailAsync(string? csvPath, ReportSlotContext ctx, CancellationToken cancellationToken)
+    private async Task<bool> TrySendGocatorReportEmailAsync(
+        string? csvPath,
+        ReportSlotContext ctx,
+        CancellationToken cancellationToken,
+        bool mergeStepAlreadySentSlottedMissingFileAlert = false)
     {
         if (string.IsNullOrEmpty(csvPath) || !File.Exists(csvPath))
         {
             _logger.LogWarning("Gocator CSV was not produced; skipping Gocator email.");
-            await _missingFileAlerts.SendMissingFilesAlertAsync(
-                new[]
-                {
-                    $"Gocator scheduled export: no report file for Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}."
-                },
-                cancellationToken,
-                scheduledSlot: ctx).ConfigureAwait(false);
+            var suppressNoPathInternal =
+                mergeStepAlreadySentSlottedMissingFileAlert || !_email.SendInternalMissingFileAlertFromGocatorMerge;
+            if (!suppressNoPathInternal)
+            {
+                await _missingFileAlerts.SendMissingFilesAlertAsync(
+                    new[]
+                    {
+                        $"Gocator scheduled export: no report file for Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}."
+                    },
+                    cancellationToken,
+                    scheduledSlot: ctx,
+                    applyPerSlotMissingAlertLimit: true).ConfigureAwait(false);
+            }
+
             return false;
         }
 

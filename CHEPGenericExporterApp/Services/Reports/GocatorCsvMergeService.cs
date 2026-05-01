@@ -10,16 +10,19 @@ namespace CHEPGenericExporterApp.Services.Reports;
 public sealed class GocatorCsvMergeService
 {
     private readonly ExportPathResolver _pathResolver;
-    private readonly IMissingFileAlertSender _missingFileAlerts;
+    private readonly IMissingFileSlottedAlertCoordinator _missingFileAlerts;
+    private readonly EmailOptions _email;
     private readonly ILogger<GocatorCsvMergeService> _logger;
 
     public GocatorCsvMergeService(
         IOptions<ExportPathsOptions> pathsOptions,
+        IOptions<EmailOptions> emailOptions,
         ExportPathResolver pathResolver,
-        IMissingFileAlertSender missingFileAlerts,
+        IMissingFileSlottedAlertCoordinator missingFileAlerts,
         ILogger<GocatorCsvMergeService> logger)
     {
         Paths = pathsOptions.Value;
+        _email = emailOptions.Value;
         _pathResolver = pathResolver;
         _missingFileAlerts = missingFileAlerts;
         _logger = logger;
@@ -27,11 +30,46 @@ public sealed class GocatorCsvMergeService
 
     private ExportPathsOptions Paths { get; }
 
+    private bool SendSlottedMissingFromMerge => _email.SendInternalMissingFileAlertFromGocatorMerge;
+
+    private async Task<bool> TrySendMergeMissingSlottedAsync(
+        ReportSlotContext slot,
+        IReadOnlyList<string> lines,
+        CancellationToken cancellationToken)
+    {
+        if (!SendSlottedMissingFromMerge)
+            return false;
+
+        await _missingFileAlerts.SendOrEnqueueSlottedAsync(
+                slot,
+                applyPerSlotMissingAlertLimit: true,
+                lines,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return true;
+    }
+
+    /// <summary>
+    /// Appends the same Top/Bottom raw-input checks used by merge (folder / values CSV) into <paramref name="missing"/> for a single combined missing-file email from the Excel step.
+    /// </summary>
+    public void AppendTopBottomInputMissingLines(ReportSlotContext slot, IList<string> missing, DateTime? targetDate = null)
+    {
+        if (missing is List<string> list)
+            AddTopBottomInputIssues(slot, list, targetDate);
+        else
+        {
+            var temp = new List<string>();
+            AddTopBottomInputIssues(slot, temp, targetDate);
+            foreach (var line in temp)
+                missing.Add(line);
+        }
+    }
+
     /// <summary>
     /// Merges latest Top/Bottom *values* CSVs (by last write time), matches rows within 1.5s, writes
     /// <c>Gocator_Report_Shift_{shift}_{date}.csv</c> using shift/date from the first merged row (same as GocatorShiftExportApp).
     /// </summary>
-    public async Task<string?> GenerateCombinedCsvAsync(
+    public async Task<GocatorMergeAttemptResult> GenerateCombinedCsvAsync(
         ReportSlotContext slot,
         CancellationToken cancellationToken = default,
         DateTime? targetDate = null)
@@ -45,27 +83,12 @@ public sealed class GocatorCsvMergeService
             Directory.CreateDirectory(combinedFolder);
 
             var missing = new List<string>();
-
-            if (!Directory.Exists(topFolder))
-                missing.Add($"Top Gocator folder missing: {topFolder}");
-            else if (FindLatestValuesCsv(topFolder, targetDate, slot.Shift) == null)
-            {
-                _logger.LogWarning("No CSV file containing 'values' found in Top folder {Folder}.", topFolder);
-                missing.Add($"No CSV file containing 'values' found in Top folder: {topFolder}");
-            }
-
-            if (!Directory.Exists(bottomFolder))
-                missing.Add($"Bottom Gocator folder missing: {bottomFolder}");
-            else if (FindLatestValuesCsv(bottomFolder, targetDate, slot.Shift) == null)
-            {
-                _logger.LogWarning("No CSV file containing 'values' found in Bottom folder {Folder}.", bottomFolder);
-                missing.Add($"No CSV file containing 'values' found in Bottom folder: {bottomFolder}");
-            }
+            AddTopBottomInputIssues(slot, missing, targetDate);
 
             if (missing.Count > 0)
             {
-                await _missingFileAlerts.SendMissingFilesAlertAsync(missing, cancellationToken, scheduledSlot: slot).ConfigureAwait(false);
-                return null;
+                var sent = await TrySendMergeMissingSlottedAsync(slot, missing, cancellationToken).ConfigureAwait(false);
+                return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: sent);
             }
 
             var topFile = FindLatestValuesCsv(topFolder, targetDate, slot.Shift)!;
@@ -75,22 +98,22 @@ public sealed class GocatorCsvMergeService
             if (topData == null || topData.Rows.Count == 0)
             {
                 _logger.LogWarning("Top CSV file has insufficient data rows.");
-                await _missingFileAlerts.SendMissingFilesAlertAsync(new[]
-                {
-                    $"Top Gocator raw CSV is unreadable or has no data rows: {topFile}"
-                }, cancellationToken, scheduledSlot: slot).ConfigureAwait(false);
-                return null;
+                var sentTop = await TrySendMergeMissingSlottedAsync(
+                    slot,
+                    new[] { $"Top Gocator raw CSV is unreadable or has no data rows: {topFile}" },
+                    cancellationToken).ConfigureAwait(false);
+                return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: sentTop);
             }
 
             var bottomData = ReadCsvFile(bottomFile, "Bottom");
             if (bottomData == null || bottomData.Rows.Count == 0)
             {
                 _logger.LogWarning("Bottom CSV file has insufficient data rows.");
-                await _missingFileAlerts.SendMissingFilesAlertAsync(new[]
-                {
-                    $"Bottom Gocator raw CSV is unreadable or has no data rows: {bottomFile}"
-                }, cancellationToken, scheduledSlot: slot).ConfigureAwait(false);
-                return null;
+                var sentBot = await TrySendMergeMissingSlottedAsync(
+                    slot,
+                    new[] { $"Bottom Gocator raw CSV is unreadable or has no data rows: {bottomFile}" },
+                    cancellationToken).ConfigureAwait(false);
+                return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: sentBot);
             }
 
             string topDateCol = FindColumnByName(topData.Headers, new[] { "top:date" });
@@ -102,11 +125,14 @@ public sealed class GocatorCsvMergeService
                 string.IsNullOrEmpty(bottomDateCol) || string.IsNullOrEmpty(bottomTimestampCol))
             {
                 _logger.LogWarning("Could not find required date/timestamp columns in CSV files.");
-                await _missingFileAlerts.SendMissingFilesAlertAsync(new[]
-                {
-                    "Could not find required date/timestamp columns in Top/Bottom CSV (need top:date, top:timestamp, bot:date, bot:timestamp)."
-                }, cancellationToken, scheduledSlot: slot).ConfigureAwait(false);
-                return null;
+                var sentCols = await TrySendMergeMissingSlottedAsync(
+                    slot,
+                    new[]
+                    {
+                        "Could not find required date/timestamp columns in Top/Bottom CSV (need top:date, top:timestamp, bot:date, bot:timestamp)."
+                    },
+                    cancellationToken).ConfigureAwait(false);
+                return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: sentCols);
             }
 
             CalculateFullTimestamps(topData.Rows, topDateCol, topTimestampCol);
@@ -188,11 +214,14 @@ public sealed class GocatorCsvMergeService
             if (combinedRows.Count == 0)
             {
                 _logger.LogWarning("No matching rows found between Top and Bottom CSV files.");
-                await _missingFileAlerts.SendMissingFilesAlertAsync(new[]
-                {
-                    "No matching rows found between Top and Bottom Gocator CSV files (within 1.5s timestamp pairing)."
-                }, cancellationToken, scheduledSlot: slot).ConfigureAwait(false);
-                return null;
+                var sentRows = await TrySendMergeMissingSlottedAsync(
+                    slot,
+                    new[]
+                    {
+                        "No matching rows found between Top and Bottom Gocator CSV files (within 1.5s timestamp pairing)."
+                    },
+                    cancellationToken).ConfigureAwait(false);
+                return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: sentRows);
             }
 
             string shiftValue = shiftCol != null && combinedRows[0].ContainsKey(shiftCol)
@@ -215,12 +244,34 @@ public sealed class GocatorCsvMergeService
             }
 
             _logger.LogInformation("Combined Gocator CSV saved to {Path}.", combinedFile);
-            return combinedFile;
+            return new GocatorMergeAttemptResult(combinedFile, SentSlottedMissingFileAlert: false);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error generating Gocator combined CSV.");
-            return null;
+            return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: false);
+        }
+    }
+
+    private void AddTopBottomInputIssues(ReportSlotContext slot, List<string> missing, DateTime? targetDate)
+    {
+        var topFolder = _pathResolver.Resolve(Paths.TopCsvFolder);
+        var bottomFolder = _pathResolver.Resolve(Paths.BottomCsvFolder);
+
+        if (!Directory.Exists(topFolder))
+            missing.Add($"Top Gocator folder missing: {topFolder}");
+        else if (FindLatestValuesCsv(topFolder, targetDate, slot.Shift) == null)
+        {
+            _logger.LogWarning("No CSV file containing 'values' found in Top folder {Folder}.", topFolder);
+            missing.Add($"No CSV file containing 'values' found in Top folder: {topFolder}");
+        }
+
+        if (!Directory.Exists(bottomFolder))
+            missing.Add($"Bottom Gocator folder missing: {bottomFolder}");
+        else if (FindLatestValuesCsv(bottomFolder, targetDate, slot.Shift) == null)
+        {
+            _logger.LogWarning("No CSV file containing 'values' found in Bottom folder {Folder}.", bottomFolder);
+            missing.Add($"No CSV file containing 'values' found in Bottom folder: {bottomFolder}");
         }
     }
 
