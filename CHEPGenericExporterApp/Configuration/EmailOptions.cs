@@ -22,6 +22,30 @@ public sealed class EmailOptions
     /// </summary>
     public bool BypassReportAttachmentSlotCheck { get; set; }
 
+    /// <summary>
+    /// Per shift + report date: each successful internal missing-file alert increments <c>MissingAlertCount</c> in the audit CSV;
+    /// <c>MissingAlertFinalized</c> is set to true when that count reaches this value (e.g. 3 allows three delivered alerts, then no more for that slot).
+    /// This is separate from SMTP <c>smtp:MaxRetryAttempts</c> (retries inside one send). Set to 0 or less to disable the cap.
+    /// </summary>
+    public int MaxMissingFileAlertsPerShiftDate { get; set; } = 3;
+
+    /// <summary>
+    /// When false, the Gocator CSV merge step does not send internal missing-file emails (Top/Bottom/merge failures).
+    /// The combined Excel step still sends one alert listing all issues, including Top/Bottom. Use when the scheduler runs Gocator then Combined so you do not get two emails per slot.
+    /// When true (default), merge sends as today; set false only if a combined report job always follows for the same slot.
+    /// </summary>
+    public bool SendInternalMissingFileAlertFromGocatorMerge { get; set; } = true;
+
+    /// <summary>Internal missing-file alert subject when <c>scheduledSlot</c> is set. Placeholders: <c>{shift}</c>, <c>{date}</c> (report date as dd-MMM-yyyy).</summary>
+    public string MissingFileAlertSubjectWithSlotTemplate { get; set; } =
+        "Missing some files – Shift {shift}, {date}";
+
+    /// <summary>Internal missing-file subject when there is no slot and exactly one issue line. Placeholder: <c>{detail}</c> (truncated).</summary>
+    public string MissingFileAlertSubjectSingleIssueTemplate { get; set; } = "File is missing – {detail}";
+
+    /// <summary>Internal missing-file subject when there is no slot and multiple issues. Placeholder: <c>{count}</c>.</summary>
+    public string MissingFileAlertSubjectMultiIssueTemplate { get; set; } = "File is missing – {count} issues";
+
     public string CombinedReportSubjectTemplate { get; set; } =
         "AMV Combined Report - Shift {shift} - {date}";
 

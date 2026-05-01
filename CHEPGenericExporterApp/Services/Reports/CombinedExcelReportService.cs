@@ -20,7 +20,8 @@ public sealed class CombinedExcelReportService
     private readonly string _s5Folder;
     private readonly string _combinedReportFolder;
     private readonly string _siteCode;
-    private readonly IMissingFileAlertSender _missingFileAlerts;
+    private readonly GocatorCsvMergeService _gocatorMerge;
+    private readonly IMissingFileSlottedAlertCoordinator _missingFileAlerts;
     private readonly ILogger<CombinedExcelReportService> _logger;
 
     /// <summary>Matches <c>...Shift_{n}_{dateSuffix}</c> at end of a report file name (date parsed loosely).</summary>
@@ -31,9 +32,11 @@ public sealed class CombinedExcelReportService
     public CombinedExcelReportService(
         IOptions<ExportPathsOptions> pathsOptions,
         ExportPathResolver pathResolver,
-        IMissingFileAlertSender missingFileAlerts,
+        GocatorCsvMergeService gocatorMerge,
+        IMissingFileSlottedAlertCoordinator missingFileAlerts,
         ILogger<CombinedExcelReportService> logger)
     {
+        _gocatorMerge = gocatorMerge;
         _missingFileAlerts = missingFileAlerts;
         _logger = logger;
         var o = pathsOptions.Value;
@@ -55,28 +58,27 @@ public sealed class CombinedExcelReportService
 
                 var missing = new List<string>();
 
-                string? gocatorCsvFile = null;
+                // Always use the requested slot (scheduled or recovery); do not pick "newest" merge — that can belong to another shift.
                 var reportCtx = ctx;
+                _gocatorMerge.AppendTopBottomInputMissingLines(reportCtx, missing, targetDate: null);
+                string? gocatorCsvFile = null;
                 var gocatorNameOk = false;
 
                 if (!Directory.Exists(_gocatorCombinedFolder))
                     missing.Add($"Gocator combined folder missing: {_gocatorCombinedFolder}");
                 else
                 {
-                    gocatorCsvFile = Directory.GetFiles(_gocatorCombinedFolder, "Gocator_Report_*.csv")
-                        .OrderByDescending(f => File.GetLastWriteTime(f))
-                        .FirstOrDefault();
+                    gocatorCsvFile = FindGocatorMergedCsvForSlot(_gocatorCombinedFolder, reportCtx);
 
                     if (gocatorCsvFile == null)
                     {
-                        _logger.LogWarning("No merged Gocator_Report_*.csv in {Folder}.", _gocatorCombinedFolder);
-                        missing.Add($"No merged Gocator_Report_*.csv found in {_gocatorCombinedFolder}.");
-                    }
-                    else if (!TryParseReportContextFromGocatorFileName(Path.GetFileNameWithoutExtension(gocatorCsvFile), out reportCtx))
-                    {
-                        _logger.LogWarning("Gocator merged file name not recognized: {File}", Path.GetFileName(gocatorCsvFile));
+                        _logger.LogWarning(
+                            "No merged Gocator_Report_*.csv for Shift {Shift}, Date {Date} in {Folder}.",
+                            reportCtx.Shift,
+                            reportCtx.ReportDateDdMmmYyyy,
+                            _gocatorCombinedFolder);
                         missing.Add(
-                            $"Merged Gocator CSV filename not recognized (expected Gocator_Report_Shift_{{n}}_{{dd-MMM-yyyy}}): {Path.GetFileName(gocatorCsvFile)}");
+                            $"No merged Gocator CSV for Shift {reportCtx.Shift}, Date {reportCtx.ReportDateDdMmmYyyy} in {_gocatorCombinedFolder} (expected Gocator_Report_Shift_{{n}}_{{dd-MMM-yyyy}}).");
                     }
                     else
                         gocatorNameOk = true;
@@ -94,22 +96,15 @@ public sealed class CombinedExcelReportService
                     }
                 }
 
-                string? s1File = null;
-                string? s2File = null;
-                string? s4File = null;
-                string? s5File = null;
-                if (gocatorNameOk)
-                {
-                    s1File = FindShiftFileStrict(_s1Folder, reportCtx);
-                    s2File = FindShiftFileStrict(_s2Folder, reportCtx);
-                    s4File = FindShiftFileStrict(_s4Folder, reportCtx);
-                    s5File = FindShiftFileStrict(_s5Folder, reportCtx);
+                string? s1File = FindShiftFileStrict(_s1Folder, reportCtx);
+                string? s2File = FindShiftFileStrict(_s2Folder, reportCtx);
+                string? s4File = FindShiftFileStrict(_s4Folder, reportCtx);
+                string? s5File = FindShiftFileStrict(_s5Folder, reportCtx);
 
-                    AppendStationPathMissing(missing, "Station 1 (S1)", _s1Folder, s1File, reportCtx);
-                    AppendStationPathMissing(missing, "Station 2 (S2)", _s2Folder, s2File, reportCtx);
-                    AppendStationPathMissing(missing, "Station 4 (S4)", _s4Folder, s4File, reportCtx);
-                    AppendStationPathMissing(missing, "Station 5 (S5)", _s5Folder, s5File, reportCtx);
-                }
+                AppendStationPathMissing(missing, "Station 1 (S1)", _s1Folder, s1File, reportCtx);
+                AppendStationPathMissing(missing, "Station 2 (S2)", _s2Folder, s2File, reportCtx);
+                AppendStationPathMissing(missing, "Station 4 (S4)", _s4Folder, s4File, reportCtx);
+                AppendStationPathMissing(missing, "Station 5 (S5)", _s5Folder, s5File, reportCtx);
 
                 ShiftData? s1Data = null;
                 ShiftData? s2Data = null;
@@ -150,7 +145,11 @@ public sealed class CombinedExcelReportService
 
                 if (missing.Count > 0)
                 {
-                    await _missingFileAlerts.SendMissingFilesAlertAsync(missing, cancellationToken, scheduledSlot: reportCtx).ConfigureAwait(false);
+                    await _missingFileAlerts.SendOrEnqueueSlottedAsync(
+                        ctx,
+                        applyPerSlotMissingAlertLimit: true,
+                        missing,
+                        cancellationToken).ConfigureAwait(false);
                     return null;
                 }
 
@@ -313,6 +312,30 @@ public sealed class CombinedExcelReportService
             var dateStr = d.ToString("dd-MMM-yyyy", CultureInfo.InvariantCulture);
             ctx = new ReportSlotContext(shift, dateStr, d);
             return true;
+        }
+
+        private static string? FindGocatorMergedCsvForSlot(string combinedFolder, ReportSlotContext ctx)
+        {
+            string? best = null;
+            var bestWt = DateTime.MinValue;
+            foreach (var f in Directory.GetFiles(combinedFolder, "Gocator_Report_*.csv"))
+            {
+                if (!TryParseReportContextFromGocatorFileName(Path.GetFileNameWithoutExtension(f), out var parsed))
+                    continue;
+                if (!ReportCsvDate.ShiftsEquivalent(parsed.Shift, ctx.Shift))
+                    continue;
+                if (parsed.ReportDate != ctx.ReportDate)
+                    continue;
+
+                var wt = File.GetLastWriteTime(f);
+                if (wt >= bestWt)
+                {
+                    bestWt = wt;
+                    best = f;
+                }
+            }
+
+            return best;
         }
 
         private string? FindShiftFileStrict(string folder, ReportSlotContext ctx)
