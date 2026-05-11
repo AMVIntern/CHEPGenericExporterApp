@@ -161,7 +161,7 @@ public sealed class CombinedExcelReportService
                 CalculateShiftTimestamps(s5Data!);
 
                 string excelFileName = Path.Combine(_combinedReportFolder,
-                    $"Combined_Report_Shift_{reportCtx.Shift}_{reportCtx.ReportDateDdMmmYyyy}.xlsx");
+                    $"{_siteCode}_Combined_Report_Shift_{reportCtx.Shift}_{reportCtx.ReportDateDdMmmYyyy}.xlsx");
                 CreateExcelFile(excelFileName, gocatorData!, s1Data!, s2Data!, s4Data!, s5Data!, out string normalizedCsvPath, out string normalizedZipPath);
 
                 _logger.LogInformation("Combined Excel file saved to: {Path}", excelFileName);
