@@ -318,7 +318,7 @@ public sealed class CombinedExcelReportService
         {
             string? best = null;
             var bestWt = DateTime.MinValue;
-            foreach (var f in Directory.GetFiles(combinedFolder, "Gocator_Report_*.csv"))
+            foreach (var f in Directory.GetFiles(combinedFolder, $"{_siteCode}_Gocator_Report_*.csv"))
             {
                 if (!TryParseReportContextFromGocatorFileName(Path.GetFileNameWithoutExtension(f), out var parsed))
                     continue;
