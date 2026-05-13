@@ -68,7 +68,7 @@ public sealed class CombinedExcelReportService
                     missing.Add($"Gocator combined folder missing: {_gocatorCombinedFolder}");
                 else
                 {
-                    gocatorCsvFile = FindGocatorMergedCsvForSlot(_gocatorCombinedFolder, reportCtx);
+                    gocatorCsvFile = FindGocatorMergedCsvForSlot(_gocatorCombinedFolder, reportCtx, _siteCode);
 
                     if (gocatorCsvFile == null)
                     {
@@ -314,11 +314,11 @@ public sealed class CombinedExcelReportService
             return true;
         }
 
-        private static string? FindGocatorMergedCsvForSlot(string combinedFolder, ReportSlotContext ctx)
+        private static string? FindGocatorMergedCsvForSlot(string combinedFolder, ReportSlotContext ctx, string siteCode)
         {
             string? best = null;
             var bestWt = DateTime.MinValue;
-            foreach (var f in Directory.GetFiles(combinedFolder, $"{_siteCode}_Gocator_Report_*.csv"))
+            foreach (var f in Directory.GetFiles(combinedFolder, $"{siteCode}_Gocator_Report_*.csv"))
             {
                 if (!TryParseReportContextFromGocatorFileName(Path.GetFileNameWithoutExtension(f), out var parsed))
                     continue;
