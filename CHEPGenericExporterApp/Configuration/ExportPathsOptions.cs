@@ -15,5 +15,5 @@ public sealed class ExportPathsOptions
     public string CombinedReportOutputFolder { get; set; } = "Csvs/Combined";
 
     /// <summary>Site column in normalized Power BI CSV.</summary>
-    public string NormalizedReportSiteCode { get; set; } = "AUB6";
+    public string NormalizedReportSiteCode { get; set; }
 }

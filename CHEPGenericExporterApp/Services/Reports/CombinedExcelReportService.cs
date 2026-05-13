@@ -68,7 +68,7 @@ public sealed class CombinedExcelReportService
                     missing.Add($"Gocator combined folder missing: {_gocatorCombinedFolder}");
                 else
                 {
-                    gocatorCsvFile = FindGocatorMergedCsvForSlot(_gocatorCombinedFolder, reportCtx);
+                    gocatorCsvFile = FindGocatorMergedCsvForSlot(_gocatorCombinedFolder, reportCtx, _siteCode);
 
                     if (gocatorCsvFile == null)
                     {
@@ -78,9 +78,9 @@ public sealed class CombinedExcelReportService
                             reportCtx.ReportDateDdMmmYyyy,
                             _gocatorCombinedFolder);
                         missing.Add(
-                            $"No merged Gocator CSV for Shift {reportCtx.Shift}, Date {reportCtx.ReportDateDdMmmYyyy} in {_gocatorCombinedFolder} (expected Gocator_Report_Shift_{{n}}_{{dd-MMM-yyyy}}).");
-                    }
-                    else
+                            $"No merged Gocator CSV for Shift {reportCtx.Shift}, Date {reportCtx.ReportDateDdMmmYyyy} in {_gocatorCombinedFolder} (expected {_siteCode}_Gocator_Report_Shift_{{n}}_{{dd-MMM-yyyy}}).");
+                }
+                else
                         gocatorNameOk = true;
                 }
 
@@ -161,7 +161,7 @@ public sealed class CombinedExcelReportService
                 CalculateShiftTimestamps(s5Data!);
 
                 string excelFileName = Path.Combine(_combinedReportFolder,
-                    $"Combined_Report_Shift_{reportCtx.Shift}_{reportCtx.ReportDateDdMmmYyyy}.xlsx");
+                    $"{_siteCode}_Combined_Report_Shift_{reportCtx.Shift}_{reportCtx.ReportDateDdMmmYyyy}.xlsx");
                 CreateExcelFile(excelFileName, gocatorData!, s1Data!, s2Data!, s4Data!, s5Data!, out string normalizedCsvPath, out string normalizedZipPath);
 
                 _logger.LogInformation("Combined Excel file saved to: {Path}", excelFileName);
@@ -314,11 +314,11 @@ public sealed class CombinedExcelReportService
             return true;
         }
 
-        private static string? FindGocatorMergedCsvForSlot(string combinedFolder, ReportSlotContext ctx)
+        private static string? FindGocatorMergedCsvForSlot(string combinedFolder, ReportSlotContext ctx, string siteCode)
         {
             string? best = null;
             var bestWt = DateTime.MinValue;
-            foreach (var f in Directory.GetFiles(combinedFolder, "Gocator_Report_*.csv"))
+            foreach (var f in Directory.GetFiles(combinedFolder, $"{siteCode}_Gocator_Report_*.csv"))
             {
                 if (!TryParseReportContextFromGocatorFileName(Path.GetFileNameWithoutExtension(f), out var parsed))
                     continue;

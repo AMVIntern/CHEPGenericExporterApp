@@ -2,6 +2,7 @@ using CHEPGenericExporterApp.Configuration;
 using CHEPGenericExporterApp.Models;
 using CHEPGenericExporterApp.Services.Email;
 using CHEPGenericExporterApp.Services.Scheduling;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
 
 namespace CHEPGenericExporterApp.Services.Reports;
@@ -13,19 +14,22 @@ public sealed class GocatorCsvMergeService
     private readonly IMissingFileSlottedAlertCoordinator _missingFileAlerts;
     private readonly EmailOptions _email;
     private readonly ILogger<GocatorCsvMergeService> _logger;
+    private readonly IConfiguration _configuration;
 
     public GocatorCsvMergeService(
         IOptions<ExportPathsOptions> pathsOptions,
         IOptions<EmailOptions> emailOptions,
         ExportPathResolver pathResolver,
         IMissingFileSlottedAlertCoordinator missingFileAlerts,
-        ILogger<GocatorCsvMergeService> logger)
+        ILogger<GocatorCsvMergeService> logger,
+        IConfiguration configuration)
     {
         Paths = pathsOptions.Value;
         _email = emailOptions.Value;
         _pathResolver = pathResolver;
         _missingFileAlerts = missingFileAlerts;
         _logger = logger;
+        _configuration = configuration;
     }
 
     private ExportPathsOptions Paths { get; }
@@ -231,7 +235,8 @@ public sealed class GocatorCsvMergeService
                 ? combinedRows[0][dateCol]
                 : DateTime.Now.ToString("dd-MMM-yyyy", CultureInfo.InvariantCulture);
 
-            string combinedFile = Path.Combine(combinedFolder, $"Gocator_Report_Shift_{shiftValue}_{dateValue}.csv");
+            var _siteCode = _configuration.GetSection("ExportPaths")["NormalizedReportSiteCode"];
+            string combinedFile = Path.Combine(combinedFolder, $"{_siteCode}_Gocator_Report_Shift_{shiftValue}_{dateValue}.csv");
 
             using (var writer = new StreamWriter(combinedFile))
             {
