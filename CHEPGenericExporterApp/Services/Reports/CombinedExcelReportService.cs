@@ -78,9 +78,9 @@ public sealed class CombinedExcelReportService
                             reportCtx.ReportDateDdMmmYyyy,
                             _gocatorCombinedFolder);
                         missing.Add(
-                            $"No merged Gocator CSV for Shift {reportCtx.Shift}, Date {reportCtx.ReportDateDdMmmYyyy} in {_gocatorCombinedFolder} (expected Gocator_Report_Shift_{{n}}_{{dd-MMM-yyyy}}).");
-                    }
-                    else
+                            $"No merged Gocator CSV for Shift {reportCtx.Shift}, Date {reportCtx.ReportDateDdMmmYyyy} in {_gocatorCombinedFolder} (expected {_siteCode}_Gocator_Report_Shift_{{n}}_{{dd-MMM-yyyy}}).");
+                }
+                else
                         gocatorNameOk = true;
                 }
 
