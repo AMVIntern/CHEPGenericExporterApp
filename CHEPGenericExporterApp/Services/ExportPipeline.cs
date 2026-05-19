@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text.RegularExpressions;
 using CHEPGenericExporterApp.Configuration;
 using CHEPGenericExporterApp.Models;
 using CHEPGenericExporterApp.Services.Email;
@@ -12,10 +11,6 @@ namespace CHEPGenericExporterApp.Services;
 /// <summary>Runs Gocator CSV merge, combined Excel generation, and optional email send.</summary>
 public sealed class ExportPipeline
 {
-    private static readonly Regex ReportShiftDateInFileName = new(
-        @"_Shift_(\d+)_(.+)$",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
-
     private readonly GocatorCsvMergeService _gocatorMerge;
     private readonly CombinedExcelReportService _excelReport;
     private readonly IEmailSender _emailSender;
@@ -143,7 +138,7 @@ public sealed class ExportPipeline
         }
 
         if (!_email.BypassReportAttachmentSlotCheck &&
-            !ReportFileMatchesScheduledSlot(csvPath, ctx))
+            !ReportCsvDate.ReportFileMatchesSlot(csvPath, ctx))
         {
             _logger.LogWarning(
                 "Gocator report file does not match scheduled shift/date; skipping customer email.");
@@ -219,7 +214,7 @@ public sealed class ExportPipeline
         }
 
         if (!_email.BypassReportAttachmentSlotCheck &&
-            !ReportFileMatchesScheduledSlot(reportResult.ExcelFilePath, ctx))
+            !ReportCsvDate.ReportFileMatchesSlot(reportResult.ExcelFilePath, ctx))
         {
             _logger.LogWarning(
                 "Combined report output does not match scheduled shift/date; skipping customer email.");
@@ -290,23 +285,58 @@ public sealed class ExportPipeline
             return false;
         }
 
+        if (reportResult.DummyStationsUsed.Count > 0)
+            await SendDummyStationMissingFileAlertAsync(reportResult, ctx, cancellationToken).ConfigureAwait(false);
+
         _logger.LogInformation("Combined report and email completed successfully.");
         _csvAuditLogger.MarkCombinedSent(ctx.Shift, ctx.ReportDate);
         return true;
     }
 
-    private static bool ReportFileMatchesScheduledSlot(string filePath, ReportSlotContext ctx)
+    private async Task SendDummyStationMissingFileAlertAsync(
+        CombinedReportResult reportResult,
+        ReportSlotContext ctx,
+        CancellationToken cancellationToken)
     {
-        var name = Path.GetFileNameWithoutExtension(filePath);
-        var m = ReportShiftDateInFileName.Match(name);
-        if (!m.Success)
-            return false;
-        if (!ReportCsvDate.ShiftsEquivalent(m.Groups[1].Value.Trim(), ctx.Shift))
-            return false;
-        if (!ReportCsvDate.TryParseLoose(m.Groups[2].Value.Trim(), out var d))
-            return false;
-        return d == ctx.ReportDate;
+        var site = string.IsNullOrWhiteSpace(reportResult.SiteCode) ? "Unknown" : reportResult.SiteCode;
+        var stations = string.Join(", ", reportResult.DummyStationsUsed);
+        var details = string.Join(
+            " ",
+            reportResult.DummyStationsUsed.Select(s =>
+                $"{s}: shift CSV missing; *_DUMMY.csv generated for Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}."));
+
+        var lines = new List<string>();
+        foreach (var station in reportResult.DummyStationsUsed)
+        {
+            lines.Add(
+                $"{StationLabel(station)}: no raw CSV for Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}; auto-generated *_DUMMY.csv placeholder (zeros).");
+        }
+
+        var dummyBody = _email.DummyStationGeneratedInternalAlertBodyTemplate
+            .Replace("{site}", site, StringComparison.Ordinal)
+            .Replace("{shift}", ctx.Shift, StringComparison.Ordinal)
+            .Replace("{date}", ctx.ReportDateDdMmmYyyy, StringComparison.Ordinal)
+            .Replace("{stations}", stations, StringComparison.Ordinal)
+            .Replace("{details}", details, StringComparison.Ordinal);
+
+        foreach (var line in dummyBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries))
+            lines.Add(line.Trim());
+
+        await _missingFileAlerts.SendMissingFilesAlertAsync(
+            lines,
+            cancellationToken,
+            scheduledSlot: ctx,
+            applyPerSlotMissingAlertLimit: true).ConfigureAwait(false);
     }
+
+    private static string StationLabel(string stationCode) => stationCode switch
+    {
+        "S1" => "Station 1 (S1)",
+        "S2" => "Station 2 (S2)",
+        "S4" => "Station 4 (S4)",
+        "S5" => "Station 5 (S5)",
+        _ => stationCode
+    };
 
     private static string FormatShiftDateTemplate(string template, string shift, string date)
     {

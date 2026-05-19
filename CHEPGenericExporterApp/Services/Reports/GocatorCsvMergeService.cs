@@ -8,7 +8,7 @@ using Microsoft.Extensions.Options;
 namespace CHEPGenericExporterApp.Services.Reports;
 
 /// <summary>Merges Top/Bottom Gocator CSV files into a combined report in the configured combined folder.</summary>
-public sealed class GocatorCsvMergeService
+public class GocatorCsvMergeService
 {
     private readonly ExportPathResolver _pathResolver;
     private readonly IMissingFileSlottedAlertCoordinator _missingFileAlerts;
@@ -58,22 +58,23 @@ public sealed class GocatorCsvMergeService
     /// </summary>
     public void AppendTopBottomInputMissingLines(ReportSlotContext slot, IList<string> missing, DateTime? targetDate = null)
     {
+        var effectiveDate = targetDate ?? slot.ReportDate.ToDateTime(TimeOnly.MinValue);
         if (missing is List<string> list)
-            AddTopBottomInputIssues(slot, list, targetDate);
+            AddTopBottomInputIssues(slot, list, effectiveDate);
         else
         {
             var temp = new List<string>();
-            AddTopBottomInputIssues(slot, temp, targetDate);
+            AddTopBottomInputIssues(slot, temp, effectiveDate);
             foreach (var line in temp)
                 missing.Add(line);
         }
     }
 
     /// <summary>
-    /// Merges latest Top/Bottom *values* CSVs (by last write time), matches rows within 1.5s, writes
-    /// <c>Gocator_Report_Shift_{shift}_{date}.csv</c> using shift/date from the first merged row (same as GocatorShiftExportApp).
+    /// Merges Top/Bottom *values* CSVs for the scheduled shift/date (filename tokens when present), matches rows within 1.5s, writes
+    /// <c>Gocator_Report_Shift_{shift}_{date}.csv</c>. Returns no path when inputs or merged shift/date do not match the slot.
     /// </summary>
-    public async Task<GocatorMergeAttemptResult> GenerateCombinedCsvAsync(
+    public virtual async Task<GocatorMergeAttemptResult> GenerateCombinedCsvAsync(
         ReportSlotContext slot,
         CancellationToken cancellationToken = default,
         DateTime? targetDate = null)
@@ -84,10 +85,11 @@ public sealed class GocatorCsvMergeService
             var bottomFolder = _pathResolver.Resolve(Paths.BottomCsvFolder);
             var combinedFolder = _pathResolver.Resolve(Paths.GocatorCombinedFolder);
 
-            Directory.CreateDirectory(combinedFolder);
+             Directory.CreateDirectory(combinedFolder);
 
+            var effectiveDate = targetDate ?? slot.ReportDate.ToDateTime(TimeOnly.MinValue);
             var missing = new List<string>();
-            AddTopBottomInputIssues(slot, missing, targetDate);
+            AddTopBottomInputIssues(slot, missing, effectiveDate);
 
             if (missing.Count > 0)
             {
@@ -95,8 +97,8 @@ public sealed class GocatorCsvMergeService
                 return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: sent);
             }
 
-            var topFile = FindLatestValuesCsv(topFolder, targetDate, slot.Shift)!;
-            var bottomFile = FindLatestValuesCsv(bottomFolder, targetDate, slot.Shift)!;
+            var topFile = FindLatestValuesCsv(topFolder, effectiveDate, slot.Shift)!;
+            var bottomFile = FindLatestValuesCsv(bottomFolder, effectiveDate, slot.Shift)!;
 
             var topData = ReadCsvFile(topFile, "Top");
             if (topData == null || topData.Rows.Count == 0)
@@ -248,6 +250,23 @@ public sealed class GocatorCsvMergeService
                 }
             }
 
+            if (!ReportCsvDate.ReportFileMatchesSlot(combinedFile, slot))
+            {
+                _logger.LogWarning(
+                    "Merged Gocator CSV does not match scheduled Shift {Shift}, Date {Date} (file: {File}).",
+                    slot.Shift,
+                    slot.ReportDateDdMmmYyyy,
+                    Path.GetFileName(combinedFile));
+                var sentMismatch = await TrySendMergeMissingSlottedAsync(
+                    slot,
+                    new[]
+                    {
+                        $"Gocator merge data does not match scheduled Shift {slot.Shift}, Date {slot.ReportDateDdMmmYyyy} (produced {Path.GetFileName(combinedFile)})."
+                    },
+                    cancellationToken).ConfigureAwait(false);
+                return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: sentMismatch);
+            }
+
             _logger.LogInformation("Combined Gocator CSV saved to {Path}.", combinedFile);
             return new GocatorMergeAttemptResult(combinedFile, SentSlottedMissingFileAlert: false);
         }
@@ -258,14 +277,14 @@ public sealed class GocatorCsvMergeService
         }
     }
 
-    private void AddTopBottomInputIssues(ReportSlotContext slot, List<string> missing, DateTime? targetDate)
+    private void AddTopBottomInputIssues(ReportSlotContext slot, List<string> missing, DateTime effectiveDate)
     {
         var topFolder = _pathResolver.Resolve(Paths.TopCsvFolder);
         var bottomFolder = _pathResolver.Resolve(Paths.BottomCsvFolder);
 
         if (!Directory.Exists(topFolder))
             missing.Add($"Top Gocator folder missing: {topFolder}");
-        else if (FindLatestValuesCsv(topFolder, targetDate, slot.Shift) == null)
+        else if (FindLatestValuesCsv(topFolder, effectiveDate, slot.Shift) == null)
         {
             _logger.LogWarning("No CSV file containing 'values' found in Top folder {Folder}.", topFolder);
             missing.Add($"No CSV file containing 'values' found in Top folder: {topFolder}");
@@ -273,14 +292,14 @@ public sealed class GocatorCsvMergeService
 
         if (!Directory.Exists(bottomFolder))
             missing.Add($"Bottom Gocator folder missing: {bottomFolder}");
-        else if (FindLatestValuesCsv(bottomFolder, targetDate, slot.Shift) == null)
+        else if (FindLatestValuesCsv(bottomFolder, effectiveDate, slot.Shift) == null)
         {
             _logger.LogWarning("No CSV file containing 'values' found in Bottom folder {Folder}.", bottomFolder);
             missing.Add($"No CSV file containing 'values' found in Bottom folder: {bottomFolder}");
         }
     }
 
-    private static string? FindLatestValuesCsv(string folder, DateTime? targetDate = null, string? targetShift = null)
+    private static string? FindLatestValuesCsv(string folder, DateTime targetDate, string? targetShift = null)
     {
         if (!Directory.Exists(folder))
             return null;
@@ -288,22 +307,14 @@ public sealed class GocatorCsvMergeService
         var valuesFiles = Directory.GetFiles(folder, "*.csv")
             .Where(f => Path.GetFileName(f).ToLowerInvariant().Contains("values"));
 
-        // Keep existing last-modified behavior intact for normal scheduled flow.
-        if (!targetDate.HasValue)
-        {
-            return valuesFiles
-                .OrderByDescending(f => File.GetLastWriteTime(f))
-                .FirstOrDefault();
-        }
-
         var tokenCandidates = new[]
         {
-            targetDate.Value.ToString("dd-MMM-yyyy", CultureInfo.InvariantCulture),
-            targetDate.Value.ToString("d-MMM-yyyy", CultureInfo.InvariantCulture),
-            targetDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
-            targetDate.Value.ToString("dd-MM-yyyy", CultureInfo.InvariantCulture),
-            targetDate.Value.ToString("yyyyMMdd", CultureInfo.InvariantCulture),
-            targetDate.Value.ToString("ddMMyyyy", CultureInfo.InvariantCulture)
+            targetDate.ToString("dd-MMM-yyyy", CultureInfo.InvariantCulture),
+            targetDate.ToString("d-MMM-yyyy", CultureInfo.InvariantCulture),
+            targetDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            targetDate.ToString("dd-MM-yyyy", CultureInfo.InvariantCulture),
+            targetDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture),
+            targetDate.ToString("ddMMyyyy", CultureInfo.InvariantCulture)
         };
 
         var dateMatches = valuesFiles
@@ -333,13 +344,10 @@ public sealed class GocatorCsvMergeService
                 .OrderByDescending(f => File.GetLastWriteTime(f))
                 .FirstOrDefault();
 
-            if (!string.IsNullOrEmpty(dateAndShiftMatch))
-                return dateAndShiftMatch;
+            return dateAndShiftMatch;
         }
 
-        return dateMatches
-            .OrderByDescending(f => File.GetLastWriteTime(f))
-            .FirstOrDefault();
+        return null;
     }
 
     private CsvData? ReadCsvFile(string filePath, string sourceName)

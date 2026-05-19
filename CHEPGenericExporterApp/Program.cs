@@ -26,6 +26,7 @@ builder.Services.AddSingleton<CsvAuditLogger>();
 builder.Services.AddSingleton<IMissingFileAlertSender, MissingFileAlertSender>();
 builder.Services.AddSingleton<IMissingFileSlottedAlertCoordinator, MissingFileSlottedAlertCoordinator>();
 builder.Services.AddSingleton<GocatorCsvMergeService>();
+builder.Services.AddSingleton<StationDummyShiftCsvService>();
 builder.Services.AddSingleton<CombinedExcelReportService>();
 builder.Services.AddSingleton<ExportPipeline>();
 builder.Services.AddHostedService<ScheduledExportWorker>();
