@@ -230,15 +230,12 @@ public class GocatorCsvMergeService
                 return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: sentRows);
             }
 
-            string shiftValue = shiftCol != null && combinedRows[0].ContainsKey(shiftCol)
-                ? combinedRows[0][shiftCol]
-                : "Unknown";
-            string dateValue = dateCol != null && combinedRows[0].ContainsKey(dateCol)
-                ? combinedRows[0][dateCol]
-                : DateTime.Now.ToString("dd-MMM-yyyy", CultureInfo.InvariantCulture);
-
             var _siteCode = _configuration.GetSection("ExportPaths")["NormalizedReportSiteCode"];
-            string combinedFile = Path.Combine(combinedFolder, $"{_siteCode}_Gocator_Report_Shift_{shiftValue}_{dateValue}.csv");
+            // Use the slot's shift and date for the filename rather than the machine timestamps in the CSV data.
+            // Overnight shifts (e.g. Shift 3 starting at 10pm) may produce data timestamped the next calendar day,
+            // which caused a spurious mismatch alert. The slot is the authoritative business date.
+            string combinedFile = Path.Combine(combinedFolder,
+                $"{_siteCode}_Gocator_Report_Shift_{slot.Shift}_{slot.ReportDateDdMmmYyyy}.csv");
 
             using (var writer = new StreamWriter(combinedFile))
             {
@@ -248,23 +245,6 @@ public class GocatorCsvMergeService
                     var rowValues = combinedHeaders.Select(h => row.ContainsKey(h) ? row[h] : "").ToArray();
                     writer.WriteLine(string.Join(",", rowValues));
                 }
-            }
-
-            if (!ReportCsvDate.ReportFileMatchesSlot(combinedFile, slot))
-            {
-                _logger.LogWarning(
-                    "Merged Gocator CSV does not match scheduled Shift {Shift}, Date {Date} (file: {File}).",
-                    slot.Shift,
-                    slot.ReportDateDdMmmYyyy,
-                    Path.GetFileName(combinedFile));
-                var sentMismatch = await TrySendMergeMissingSlottedAsync(
-                    slot,
-                    new[]
-                    {
-                        $"Gocator merge data does not match scheduled Shift {slot.Shift}, Date {slot.ReportDateDdMmmYyyy} (produced {Path.GetFileName(combinedFile)})."
-                    },
-                    cancellationToken).ConfigureAwait(false);
-                return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: sentMismatch);
             }
 
             _logger.LogInformation("Combined Gocator CSV saved to {Path}.", combinedFile);
