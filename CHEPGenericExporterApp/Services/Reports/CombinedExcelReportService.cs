@@ -11,7 +11,7 @@ using System.Text;
 
 namespace CHEPGenericExporterApp.Services.Reports;
 
-public sealed class CombinedExcelReportService
+public class CombinedExcelReportService
 {
     private readonly string _gocatorCombinedFolder;
     private readonly string _s1Folder;
@@ -21,7 +21,9 @@ public sealed class CombinedExcelReportService
     private readonly string _combinedReportFolder;
     private readonly string _siteCode;
     private readonly GocatorCsvMergeService _gocatorMerge;
+    private readonly StationDummyShiftCsvService _dummyStationCsv;
     private readonly IMissingFileSlottedAlertCoordinator _missingFileAlerts;
+    private readonly bool _createDummyStationShiftCsvWhenMissing;
     private readonly ILogger<CombinedExcelReportService> _logger;
 
     /// <summary>Matches <c>...Shift_{n}_{dateSuffix}</c> at end of a report file name (date parsed loosely).</summary>
@@ -33,13 +35,16 @@ public sealed class CombinedExcelReportService
         IOptions<ExportPathsOptions> pathsOptions,
         ExportPathResolver pathResolver,
         GocatorCsvMergeService gocatorMerge,
+        StationDummyShiftCsvService dummyStationCsv,
         IMissingFileSlottedAlertCoordinator missingFileAlerts,
         ILogger<CombinedExcelReportService> logger)
     {
         _gocatorMerge = gocatorMerge;
+        _dummyStationCsv = dummyStationCsv;
         _missingFileAlerts = missingFileAlerts;
         _logger = logger;
         var o = pathsOptions.Value;
+        _createDummyStationShiftCsvWhenMissing = o.CreateDummyStationShiftCsvWhenMissing;
         _gocatorCombinedFolder = pathResolver.Resolve(o.GocatorCombinedFolder);
         _s1Folder = pathResolver.Resolve(o.S1Folder);
         _s2Folder = pathResolver.Resolve(o.S2Folder);
@@ -49,7 +54,7 @@ public sealed class CombinedExcelReportService
         _siteCode = string.IsNullOrWhiteSpace(o.NormalizedReportSiteCode) ? "AUB6" : o.NormalizedReportSiteCode;
     }
 
-    public async Task<CombinedReportResult?> GenerateCombinedExcelReportAsync(ReportSlotContext ctx, CancellationToken cancellationToken = default)
+    public virtual async Task<CombinedReportResult?> GenerateCombinedExcelReportAsync(ReportSlotContext ctx, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -68,7 +73,7 @@ public sealed class CombinedExcelReportService
                     missing.Add($"Gocator combined folder missing: {_gocatorCombinedFolder}");
                 else
                 {
-                    gocatorCsvFile = FindGocatorMergedCsvForSlot(_gocatorCombinedFolder, reportCtx);
+                    gocatorCsvFile = FindGocatorMergedCsvForSlot(_gocatorCombinedFolder, reportCtx, _siteCode);
 
                     if (gocatorCsvFile == null)
                     {
@@ -78,9 +83,9 @@ public sealed class CombinedExcelReportService
                             reportCtx.ReportDateDdMmmYyyy,
                             _gocatorCombinedFolder);
                         missing.Add(
-                            $"No merged Gocator CSV for Shift {reportCtx.Shift}, Date {reportCtx.ReportDateDdMmmYyyy} in {_gocatorCombinedFolder} (expected Gocator_Report_Shift_{{n}}_{{dd-MMM-yyyy}}).");
-                    }
-                    else
+                            $"No merged Gocator CSV for Shift {reportCtx.Shift}, Date {reportCtx.ReportDateDdMmmYyyy} in {_gocatorCombinedFolder} (expected {_siteCode}_Gocator_Report_Shift_{{n}}_{{dd-MMM-yyyy}}).");
+                }
+                else
                         gocatorNameOk = true;
                 }
 
@@ -96,15 +101,11 @@ public sealed class CombinedExcelReportService
                     }
                 }
 
-                string? s1File = FindShiftFileStrict(_s1Folder, reportCtx);
-                string? s2File = FindShiftFileStrict(_s2Folder, reportCtx);
-                string? s4File = FindShiftFileStrict(_s4Folder, reportCtx);
-                string? s5File = FindShiftFileStrict(_s5Folder, reportCtx);
-
-                AppendStationPathMissing(missing, "Station 1 (S1)", _s1Folder, s1File, reportCtx);
-                AppendStationPathMissing(missing, "Station 2 (S2)", _s2Folder, s2File, reportCtx);
-                AppendStationPathMissing(missing, "Station 4 (S4)", _s4Folder, s4File, reportCtx);
-                AppendStationPathMissing(missing, "Station 5 (S5)", _s5Folder, s5File, reportCtx);
+                var dummyStationsUsed = new List<string>();
+                string? s1File = ResolveStationShiftFile(_s1Folder, reportCtx, gocatorData, "S1", "Station 1 (S1)", missing, dummyStationsUsed);
+                string? s2File = ResolveStationShiftFile(_s2Folder, reportCtx, gocatorData, "S2", "Station 2 (S2)", missing, dummyStationsUsed);
+                string? s4File = ResolveStationShiftFile(_s4Folder, reportCtx, gocatorData, "S4", "Station 4 (S4)", missing, dummyStationsUsed);
+                string? s5File = ResolveStationShiftFile(_s5Folder, reportCtx, gocatorData, "S5", "Station 5 (S5)", missing, dummyStationsUsed);
 
                 ShiftData? s1Data = null;
                 ShiftData? s2Data = null;
@@ -161,7 +162,7 @@ public sealed class CombinedExcelReportService
                 CalculateShiftTimestamps(s5Data!);
 
                 string excelFileName = Path.Combine(_combinedReportFolder,
-                    $"Combined_Report_Shift_{reportCtx.Shift}_{reportCtx.ReportDateDdMmmYyyy}.xlsx");
+                    $"{_siteCode}_Combined_Report_Shift_{reportCtx.Shift}_{reportCtx.ReportDateDdMmmYyyy}.xlsx");
                 CreateExcelFile(excelFileName, gocatorData!, s1Data!, s2Data!, s4Data!, s5Data!, out string normalizedCsvPath, out string normalizedZipPath);
 
                 _logger.LogInformation("Combined Excel file saved to: {Path}", excelFileName);
@@ -170,7 +171,14 @@ public sealed class CombinedExcelReportService
                 if (!string.IsNullOrEmpty(normalizedZipPath))
                     _logger.LogInformation("Normalized report zip created: {Path}", normalizedZipPath);
 
-                return new CombinedReportResult { ExcelFilePath = excelFileName, NormalizedCsvPath = normalizedCsvPath, NormalizedZipPath = normalizedZipPath };
+                return new CombinedReportResult
+                {
+                    ExcelFilePath = excelFileName,
+                    NormalizedCsvPath = normalizedCsvPath,
+                    NormalizedZipPath = normalizedZipPath,
+                    DummyStationsUsed = dummyStationsUsed,
+                    SiteCode = _siteCode
+                };
             }
             catch (Exception ex)
             {
@@ -284,6 +292,52 @@ public sealed class CombinedExcelReportService
             }
         }
 
+        private string? ResolveStationShiftFile(
+            string folder,
+            ReportSlotContext ctx,
+            CsvData? gocatorData,
+            string stationCode,
+            string label,
+            List<string> missing,
+            List<string> dummyStationsUsed)
+        {
+            var file = FindShiftFileStrict(folder, ctx);
+            if (file != null)
+                return file;
+
+            if (_createDummyStationShiftCsvWhenMissing &&
+                gocatorData != null &&
+                gocatorData.Rows.Count > 0 &&
+                Directory.Exists(folder))
+            {
+                if (_dummyStationCsv.TryCreateDummyShiftFile(
+                        folder,
+                        ctx,
+                        gocatorData,
+                        stationCode,
+                        label,
+                        out var dummyPath,
+                        out var failureReason))
+                {
+                    _logger.LogWarning(
+                        "Missing {Label} shift CSV for Shift {Shift}, Date {Date}; using dummy file {File}.",
+                        label,
+                        ctx.Shift,
+                        ctx.ReportDateDdMmmYyyy,
+                        Path.GetFileName(dummyPath));
+                    dummyStationsUsed.Add(stationCode);
+                    return dummyPath;
+                }
+
+                missing.Add(
+                    $"{label}: no raw CSV for Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}; dummy generation failed ({failureReason}).");
+                return null;
+            }
+
+            AppendStationPathMissing(missing, label, folder, null, ctx);
+            return null;
+        }
+
         private static void AppendStationPathMissing(
             List<string> missing,
             string label,
@@ -314,11 +368,11 @@ public sealed class CombinedExcelReportService
             return true;
         }
 
-        private static string? FindGocatorMergedCsvForSlot(string combinedFolder, ReportSlotContext ctx)
+        private static string? FindGocatorMergedCsvForSlot(string combinedFolder, ReportSlotContext ctx, string siteCode)
         {
             string? best = null;
             var bestWt = DateTime.MinValue;
-            foreach (var f in Directory.GetFiles(combinedFolder, "Gocator_Report_*.csv"))
+            foreach (var f in Directory.GetFiles(combinedFolder, $"{siteCode}_Gocator_Report_*.csv"))
             {
                 if (!TryParseReportContextFromGocatorFileName(Path.GetFileNameWithoutExtension(f), out var parsed))
                     continue;
@@ -674,8 +728,7 @@ public sealed class CombinedExcelReportService
 
         private static readonly HashSet<string> GocatorIgnoreColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "Shift", "Top:Date", "Top:Timestamp", "Top:BoardCount", "Top:SquarenessDifference",
-            "Top:Overall Pass", "Bot:BoardCount", "Bot:Overall_Result"
+            "Shift", "Top:Date", "Top:Timestamp"
         };
 
         private static string StripGocatorColumnPrefix(string header)

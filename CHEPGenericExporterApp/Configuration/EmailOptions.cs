@@ -52,6 +52,13 @@ public sealed class EmailOptions
     public string CombinedReportBodyWithZip { get; set; } = "";
     public string CombinedReportBodyWithoutZip { get; set; } = "";
 
+    /// <summary>
+    /// Appended to the standard internal missing-file alert (same subject as other missing-file mail) when dummy station CSVs were used.
+    /// Placeholders: <c>{site}</c>, <c>{shift}</c>, <c>{date}</c>, <c>{stations}</c>, <c>{details}</c>.
+    /// </summary>
+    public string DummyStationGeneratedInternalAlertBodyTemplate { get; set; } =
+        "Dummy station placeholder CSV(s) were auto-generated (zero values, *_DUMMY.csv) and the customer combined report was still sent.\r\nSite: {site}\r\nShift: {shift}\r\nReport date: {date}\r\nStations: {stations}\r\n{details}";
+
     /// <summary>Gocator-only subject (if you add a Gocator mail step).</summary>
     public string GocatorReportSubjectTemplate { get; set; } = "AMV Gocator Report";
 

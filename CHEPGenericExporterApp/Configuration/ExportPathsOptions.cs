@@ -15,5 +15,10 @@ public sealed class ExportPathsOptions
     public string CombinedReportOutputFolder { get; set; } = "Csvs/Combined";
 
     /// <summary>Site column in normalized Power BI CSV.</summary>
-    public string NormalizedReportSiteCode { get; set; } = "AUB6";
+    public string NormalizedReportSiteCode { get; set; }
+
+    /// <summary>
+    /// When true, a missing S1/S2/S4/S5 shift CSV is replaced with a generated <c>*_DUMMY.csv</c> (zeros, headers copied from another file in that folder).
+    /// </summary>
+    public bool CreateDummyStationShiftCsvWhenMissing { get; set; }
 }
