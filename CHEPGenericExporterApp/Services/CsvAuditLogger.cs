@@ -70,6 +70,30 @@ public sealed class CsvAuditLogger
         UpdateRow(shift, date, (row, now) => row with { CombinedReportSent = true, LastAttemptUtc = now });
     }
 
+    /// <summary>Returns true when the audit already records a successful Gocator email for this slot.</summary>
+    public bool IsGocatorSent(string shift, DateOnly date)
+    {
+        var normalizedShift = NormalizeShift(shift);
+        lock (_sync)
+        {
+            var rows = ReadAllRowsNoLock();
+            var row = rows.FirstOrDefault(r => r.Shift == normalizedShift && r.Date == date);
+            return row.Shift is not null && row.GocatorReportSent;
+        }
+    }
+
+    /// <summary>Returns true when the audit already records a successful Combined email for this slot.</summary>
+    public bool IsCombinedSent(string shift, DateOnly date)
+    {
+        var normalizedShift = NormalizeShift(shift);
+        lock (_sync)
+        {
+            var rows = ReadAllRowsNoLock();
+            var row = rows.FirstOrDefault(r => r.Shift == normalizedShift && r.Date == date);
+            return row.Shift is not null && row.CombinedReportSent;
+        }
+    }
+
     public void MarkAttempt(string shift, DateOnly date)
     {
         UpdateRow(shift, date, (row, now) => row with { LastAttemptUtc = now });

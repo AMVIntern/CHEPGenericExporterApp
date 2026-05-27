@@ -117,6 +117,16 @@ public sealed class ExportPipeline
         CancellationToken cancellationToken,
         bool mergeStepAlreadySentSlottedMissingFileAlert = false)
     {
+        // Guard against duplicate sends: if the audit already recorded a successful Gocator email
+        // for this slot (e.g. after a PC/app restart with RunOnStart=true), skip re-sending.
+        if (_csvAuditLogger.IsGocatorSent(ctx.Shift, ctx.ReportDate))
+        {
+            _logger.LogInformation(
+                "Gocator report already sent for Shift {Shift}, Date {Date}; skipping duplicate send.",
+                ctx.Shift, ctx.ReportDateDdMmmYyyy);
+            return true;
+        }
+
         if (string.IsNullOrEmpty(csvPath) || !File.Exists(csvPath))
         {
             _logger.LogWarning("Gocator CSV was not produced; skipping Gocator email.");
@@ -203,6 +213,16 @@ public sealed class ExportPipeline
 
     private async Task<bool> TrySendCombinedReportEmailAsync(ReportSlotContext ctx, CancellationToken cancellationToken)
     {
+        // Guard against duplicate sends: if the audit already recorded a successful Combined email
+        // for this slot (e.g. after a PC/app restart with RunOnStart=true), skip re-sending.
+        if (_csvAuditLogger.IsCombinedSent(ctx.Shift, ctx.ReportDate))
+        {
+            _logger.LogInformation(
+                "Combined report already sent for Shift {Shift}, Date {Date}; skipping duplicate send.",
+                ctx.Shift, ctx.ReportDateDdMmmYyyy);
+            return true;
+        }
+
         var reportResult = await _excelReport.GenerateCombinedExcelReportAsync(ctx, cancellationToken).ConfigureAwait(false);
 
         if (reportResult == null ||
