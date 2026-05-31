@@ -43,7 +43,7 @@ public sealed class ScheduleCalculator : IScheduleCalculator
         if (idx < 0)
             idx = FindClosestSlotIndex(local, slots);
 
-        var (shift, reportDate) = MapShiftAndDate(idx, dateOnly);
+        var (shift, reportDate) = MapShiftAndDate(idx, dateOnly, local.DayOfWeek);
 
         var dateStr = reportDate.ToString("dd-MMM-yyyy", CultureInfo.InvariantCulture);
         return new ReportSlotContext(shift, dateStr, reportDate);
@@ -80,14 +80,20 @@ public sealed class ScheduleCalculator : IScheduleCalculator
         return best;
     }
 
-    private (string Shift, DateOnly ReportDate) MapShiftAndDate(int slotIndex, DateOnly jobLocalDate)
+    private (string Shift, DateOnly ReportDate) MapShiftAndDate(int slotIndex, DateOnly jobLocalDate, DayOfWeek dayOfWeek)
     {
         // CHEP shift numbering for 3 slots:
-        // first slot (typically 06:xx) belongs to Shift 3 of previous date.
-        // second slot (typically 14:xx) is Shift 1 of same date.
-        // third slot (typically 22:xx) is Shift 2 of same date.
+        // first slot  (typically 06:xx) → Shift 3 of previous date (end of overnight run).
+        // second slot (typically 14:xx) → Shift 1 of same date.
+        // third slot  (typically 22:xx) → Shift 2 of same date (weekdays).
+        //
+        // Sunday is the exception: only the last slot (22:xx) runs and it marks the
+        // START of Shift 3 (overnight Sunday→Monday), so it maps to Shift 3 of same date.
         if (_gocatorSlots.Length == 3)
         {
+            if (dayOfWeek == DayOfWeek.Sunday)
+                return ("3", jobLocalDate);
+
             return slotIndex switch
             {
                 0 => ("3", jobLocalDate.AddDays(-1)),
