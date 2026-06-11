@@ -37,6 +37,7 @@ public sealed class InMemoryEmailRetryQueue : IEmailRetryQueue
             Subject = src.Subject,
             Body = src.Body,
             PrimaryAttachmentPath = src.PrimaryAttachmentPath,
-            AdditionalAttachmentPaths = src.AdditionalAttachmentPaths?.ToList()
+            AdditionalAttachmentPaths = src.AdditionalAttachmentPaths?.ToList(),
+            AuditContext = src.AuditContext
         };
 }
