@@ -188,7 +188,8 @@ public sealed class ExportPipeline
             Subject = subject,
             Body = body,
             PrimaryAttachmentPath = csvPath,
-            AdditionalAttachmentPaths = null
+            AdditionalAttachmentPaths = null,
+            AuditContext = new EmailAuditContext(ctx.Shift, ctx.ReportDate, EmailAuditKind.Gocator)
         };
 
         var sent = await _emailSender.SendAsync(message, cancellationToken).ConfigureAwait(false);
@@ -289,7 +290,8 @@ public sealed class ExportPipeline
             Subject = subject,
             Body = body,
             PrimaryAttachmentPath = reportResult.ExcelFilePath,
-            AdditionalAttachmentPaths = additional
+            AdditionalAttachmentPaths = additional,
+            AuditContext = new EmailAuditContext(ctx.Shift, ctx.ReportDate, EmailAuditKind.Combined)
         };
 
         var sent = await _emailSender.SendAsync(message, cancellationToken).ConfigureAwait(false);
