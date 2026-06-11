@@ -1,4 +1,6 @@
 using CHEPGenericExporterApp.Configuration;
+using CHEPGenericExporterApp.Models;
+using CHEPGenericExporterApp.Services;
 using CHEPGenericExporterApp.Services.Email;
 using Microsoft.Extensions.Options;
 
@@ -12,17 +14,20 @@ public sealed class EmailRetryWorker : BackgroundService
     private readonly IEmailRetryQueue _retryQueue;
     private readonly SmtpEmailSender _smtpSender;
     private readonly IOptions<SmtpOptions> _smtpOptions;
+    private readonly CsvAuditLogger _csvAuditLogger;
     private readonly ILogger<EmailRetryWorker> _logger;
 
     public EmailRetryWorker(
         IEmailRetryQueue retryQueue,
         SmtpEmailSender smtpSender,
         IOptions<SmtpOptions> smtpOptions,
+        CsvAuditLogger csvAuditLogger,
         ILogger<EmailRetryWorker> logger)
     {
         _retryQueue = retryQueue;
         _smtpSender = smtpSender;
         _smtpOptions = smtpOptions;
+        _csvAuditLogger = csvAuditLogger;
         _logger = logger;
     }
 
@@ -59,6 +64,7 @@ public sealed class EmailRetryWorker : BackgroundService
             if (ok)
             {
                 sent++;
+                MarkAuditIfPresent(mail.AuditContext);
             }
             else
             {
@@ -72,5 +78,14 @@ public sealed class EmailRetryWorker : BackgroundService
             sent,
             failed,
             _retryQueue.Count);
+    }
+
+    private void MarkAuditIfPresent(EmailAuditContext? ctx)
+    {
+        if (ctx is null) return;
+        if (ctx.Kind == EmailAuditKind.Gocator)
+            _csvAuditLogger.MarkGocatorSent(ctx.Shift, ctx.ReportDate);
+        else
+            _csvAuditLogger.MarkCombinedSent(ctx.Shift, ctx.ReportDate);
     }
 }
