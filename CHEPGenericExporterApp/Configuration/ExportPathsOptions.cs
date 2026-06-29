@@ -21,4 +21,10 @@ public sealed class ExportPathsOptions
     /// When true, a missing S1/S2/S4/S5 shift CSV is replaced with a generated <c>*_DUMMY.csv</c> (zeros, headers copied from another file in that folder).
     /// </summary>
     public bool CreateDummyStationShiftCsvWhenMissing { get; set; }
+
+    /// <summary>
+    /// Attribute names to omit from the normalized Power BI CSV (and its zip).
+    /// Matched case-insensitively against the Attribute column value.
+    /// </summary>
+    public List<string> NormalizedReportExcludedAttributes { get; set; } = new();
 }

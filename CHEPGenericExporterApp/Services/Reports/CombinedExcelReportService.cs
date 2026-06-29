@@ -24,6 +24,7 @@ public class CombinedExcelReportService
     private readonly StationDummyShiftCsvService _dummyStationCsv;
     private readonly IMissingFileSlottedAlertCoordinator _missingFileAlerts;
     private readonly bool _createDummyStationShiftCsvWhenMissing;
+    private readonly HashSet<string> _excludedAttributes;
     private readonly ILogger<CombinedExcelReportService> _logger;
 
     /// <summary>Matches <c>...Shift_{n}_{dateSuffix}</c> at end of a report file name (date parsed loosely).</summary>
@@ -45,6 +46,7 @@ public class CombinedExcelReportService
         _logger = logger;
         var o = pathsOptions.Value;
         _createDummyStationShiftCsvWhenMissing = o.CreateDummyStationShiftCsvWhenMissing;
+        _excludedAttributes = new HashSet<string>(o.NormalizedReportExcludedAttributes ?? Enumerable.Empty<string>(), StringComparer.OrdinalIgnoreCase);
         _gocatorCombinedFolder = pathResolver.Resolve(o.GocatorCombinedFolder);
         _s1Folder = pathResolver.Resolve(o.S1Folder);
         _s2Folder = pathResolver.Resolve(o.S2Folder);
@@ -869,6 +871,9 @@ public class CombinedExcelReportService
                 }
             }
         }
+
+        if (_excludedAttributes.Count > 0)
+            normalizedRows.RemoveAll(r => _excludedAttributes.Contains(r.Attribute));
 
         if (!string.IsNullOrEmpty(normalizedCsvOutputPath))
         {
