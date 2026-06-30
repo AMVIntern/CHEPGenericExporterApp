@@ -24,6 +24,8 @@ public class CombinedExcelReportService
     private readonly StationDummyShiftCsvService _dummyStationCsv;
     private readonly IMissingFileSlottedAlertCoordinator _missingFileAlerts;
     private readonly bool _createDummyStationShiftCsvWhenMissing;
+    private readonly HashSet<string> _boardSubHeaders;
+    private readonly Dictionary<string, string> _stationPrefixes;
     private readonly ILogger<CombinedExcelReportService> _logger;
 
     /// <summary>Matches <c>...Shift_{n}_{dateSuffix}</c> at end of a report file name (date parsed loosely).</summary>
@@ -45,6 +47,8 @@ public class CombinedExcelReportService
         _logger = logger;
         var o = pathsOptions.Value;
         _createDummyStationShiftCsvWhenMissing = o.CreateDummyStationShiftCsvWhenMissing;
+        _boardSubHeaders = new HashSet<string>(o.NormalizedReportBoardSubHeaders ?? Enumerable.Empty<string>(), StringComparer.OrdinalIgnoreCase);
+        _stationPrefixes = new Dictionary<string, string>(o.NormalizedReportStationPrefixes ?? new(), StringComparer.OrdinalIgnoreCase);
         _gocatorCombinedFolder = pathResolver.Resolve(o.GocatorCombinedFolder);
         _s1Folder = pathResolver.Resolve(o.S1Folder);
         _s2Folder = pathResolver.Resolve(o.S2Folder);
@@ -860,15 +864,20 @@ public class CombinedExcelReportService
                     string header = stationData.Headers[j];
                     if (keyColumns.Contains(header)) continue;
 
-                    string subHeader = (stationData.SubHeaders != null && j < stationData.SubHeaders.Length)
-                        ? (stationData.SubHeaders[j] ?? "")
-                        : "";
-                    string attribute = string.IsNullOrEmpty(subHeader) ? header : (subHeader + "_" + header);
-                    string value = (matchedRow.Values != null && j < matchedRow.Values.Length) ? (matchedRow.Values[j] ?? "") : "";
-                    normalizedRows.Add((date, ts, shift, attribute, visionStation, value));
+                        string subHeader = (stationData.SubHeaders != null && j < stationData.SubHeaders.Length)
+                            ? (stationData.SubHeaders[j] ?? "")
+                            : "";
+                        string attribute = string.IsNullOrEmpty(subHeader) ? header : (subHeader + "_" + header);
+                        if (_boardSubHeaders.Count > 0 && _boardSubHeaders.Contains(subHeader) &&
+                            _stationPrefixes.TryGetValue(stationData.Station, out var stationPrefix))
+                        {
+                            attribute = stationPrefix + attribute;
+                        }
+                        string value = (matchedRow.Values != null && j < matchedRow.Values.Length) ? (matchedRow.Values[j] ?? "") : "";
+                        normalizedRows.Add((date, ts, shift, attribute, visionStation, value));
+                    }
                 }
             }
-        }
 
         if (!string.IsNullOrEmpty(normalizedCsvOutputPath))
         {
