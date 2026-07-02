@@ -854,7 +854,6 @@ public class CombinedExcelReportService
                     .OrderBy(r => r.FullTimestamp)
                     .ToList();
                 ShiftRow matchedRow = FindMatchingShiftRow(gocatorRow.FullTimestamp, sortedShiftRows);
-                if (matchedRow == null) continue;
 
                 string visionStation = GetStationDisplayName(stationData.Station);
                 var keyColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Station", "Date", "Timestamp", "Shift" };
@@ -873,7 +872,9 @@ public class CombinedExcelReportService
                     {
                         attribute = stationPrefix + attribute;
                     }
-                    string value = (matchedRow.Values != null && j < matchedRow.Values.Length) ? (matchedRow.Values[j] ?? "") : "";
+                    string value = matchedRow != null
+                        ? ((matchedRow.Values != null && j < matchedRow.Values.Length) ? (matchedRow.Values[j] ?? "") : "")
+                        : "0";
                     normalizedRows.Add((date, ts, shift, attribute, visionStation, value));
                 }
             }
