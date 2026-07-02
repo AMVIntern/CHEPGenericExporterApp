@@ -41,6 +41,14 @@ public sealed class ExportPipelineIntegrationTests
                 It.IsAny<ReportSlotContext?>(),
                 It.IsAny<bool>()))
             .Returns(Task.CompletedTask);
+        var reportEventLogger = new ReportEventLogger(
+    env.Configuration,
+    env.ExportPathsOptions(),
+    Options.Create(new SchedulerOptions
+    {
+        TimeZoneId = "UTC"
+    }),
+    NullLogger<ReportEventLogger>.Instance);
 
         return new ExportPipeline(
             new GocatorCsvMergeService(
@@ -73,6 +81,7 @@ public sealed class ExportPipelineIntegrationTests
             missingAlerts.Object,
             NoOpSlottedAlertCoordinator.Instance,
             new CsvAuditLogger(CreateAuditConfiguration()),
+            reportEventLogger,
             Options.Create(new EmailOptions
             {
                 FromAddress = "test@example.com",
