@@ -18,6 +18,7 @@ public sealed class ExportPipeline
     private readonly IMissingFileAlertSender _missingFileAlerts;
     private readonly IMissingFileSlottedAlertCoordinator _slottedMissingFileAlerts;
     private readonly CsvAuditLogger _csvAuditLogger;
+    private readonly ReportEventLogger _reportEvents;
     private readonly EmailOptions _email;
     private readonly ILogger<ExportPipeline> _logger;
 
@@ -29,6 +30,7 @@ public sealed class ExportPipeline
         IMissingFileAlertSender missingFileAlerts,
         IMissingFileSlottedAlertCoordinator slottedMissingFileAlerts,
         CsvAuditLogger csvAuditLogger,
+        ReportEventLogger reportEventLogger,
         IOptions<EmailOptions> emailOptions,
         ILogger<ExportPipeline> logger)
     {
@@ -39,6 +41,7 @@ public sealed class ExportPipeline
         _missingFileAlerts = missingFileAlerts;
         _slottedMissingFileAlerts = slottedMissingFileAlerts;
         _csvAuditLogger = csvAuditLogger;
+        _reportEvents = reportEventLogger;
         _email = emailOptions.Value;
         _logger = logger;
     }
@@ -144,6 +147,9 @@ public sealed class ExportPipeline
                     applyPerSlotMissingAlertLimit: true).ConfigureAwait(false);
             }
 
+            _reportEvents.Emit(ctx, ReportEventKind.GocatorFailed, ReportOutcomeReason.NoCsvFile,
+                $"Gocator CSV not produced for Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}.",
+                missingInputs: [$"Gocator merged CSV: Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}"]);
             return false;
         }
 
@@ -159,6 +165,8 @@ public sealed class ExportPipeline
                 },
                 cancellationToken,
                 scheduledSlot: ctx).ConfigureAwait(false);
+            _reportEvents.Emit(ctx, ReportEventKind.GocatorFailed, ReportOutcomeReason.SlotMismatch,
+                $"Report file '{Path.GetFileName(csvPath)}' does not match Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}.");
             return false;
         }
 
@@ -168,12 +176,16 @@ public sealed class ExportPipeline
         if (string.IsNullOrWhiteSpace(_email.FromAddress))
         {
             _logger.LogWarning("Email FromAddress is not configured; skipping Gocator email.");
+            _reportEvents.Emit(ctx, ReportEventKind.GocatorFailed, ReportOutcomeReason.NotConfigured,
+                "Email FromAddress is not configured.");
             return false;
         }
 
         if (_email.ToAddresses == null || _email.ToAddresses.Count == 0)
         {
             _logger.LogWarning("No ToAddresses configured; skipping Gocator email.");
+            _reportEvents.Emit(ctx, ReportEventKind.GocatorFailed, ReportOutcomeReason.NotConfigured,
+                "No ToAddresses configured.");
             return false;
         }
 
@@ -202,12 +214,15 @@ public sealed class ExportPipeline
                 },
                 cancellationToken,
                 scheduledSlot: ctx).ConfigureAwait(false);
+            _reportEvents.Emit(ctx, ReportEventKind.GocatorFailed, ReportOutcomeReason.EmailFailed,
+                $"Gocator report email failed after retries for Shift {shift}, Date {date}.");
             return false;
         }
         else
         {
             _logger.LogInformation("Gocator report email sent successfully.");
             _csvAuditLogger.MarkGocatorSent(ctx.Shift, ctx.ReportDate);
+            _reportEvents.Emit(ctx, ReportEventKind.GocatorSent, ReportOutcomeReason.Success);
             return true;
         }
     }
@@ -231,6 +246,9 @@ public sealed class ExportPipeline
             !File.Exists(reportResult.ExcelFilePath))
         {
             _logger.LogWarning("Combined Excel report was not produced; skipping email.");
+            _reportEvents.Emit(ctx, ReportEventKind.CombinedFailed, ReportOutcomeReason.ReportNotProduced,
+                $"Combined Excel report not produced for Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}.",
+                missingInputs: [$"Combined Excel report: Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}"]);
             return false;
         }
 
@@ -246,6 +264,8 @@ public sealed class ExportPipeline
                 },
                 cancellationToken,
                 scheduledSlot: ctx).ConfigureAwait(false);
+            _reportEvents.Emit(ctx, ReportEventKind.CombinedFailed, ReportOutcomeReason.SlotMismatch,
+                $"Report file '{Path.GetFileName(reportResult.ExcelFilePath)}' does not match Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}.");
             return false;
         }
 
@@ -273,12 +293,16 @@ public sealed class ExportPipeline
         if (string.IsNullOrWhiteSpace(_email.FromAddress))
         {
             _logger.LogWarning("Email FromAddress is not configured; skipping send.");
+            _reportEvents.Emit(ctx, ReportEventKind.CombinedFailed, ReportOutcomeReason.NotConfigured,
+                "Email FromAddress is not configured.");
             return false;
         }
 
         if (_email.ToAddresses == null || _email.ToAddresses.Count == 0)
         {
             _logger.LogWarning("No ToAddresses configured; skipping send.");
+            _reportEvents.Emit(ctx, ReportEventKind.CombinedFailed, ReportOutcomeReason.NotConfigured,
+                "No ToAddresses configured.");
             return false;
         }
 
@@ -304,6 +328,8 @@ public sealed class ExportPipeline
                 },
                 cancellationToken,
                 scheduledSlot: ctx).ConfigureAwait(false);
+            _reportEvents.Emit(ctx, ReportEventKind.CombinedFailed, ReportOutcomeReason.EmailFailed,
+                $"Combined report email failed after retries for Shift {shift}, Date {date}.");
             return false;
         }
 
@@ -312,6 +338,8 @@ public sealed class ExportPipeline
 
         _logger.LogInformation("Combined report and email completed successfully.");
         _csvAuditLogger.MarkCombinedSent(ctx.Shift, ctx.ReportDate);
+        _reportEvents.Emit(ctx, ReportEventKind.CombinedSent, ReportOutcomeReason.Success,
+            dummyStations: reportResult.DummyStationsUsed.Count > 0 ? reportResult.DummyStationsUsed : null);
         return true;
     }
 

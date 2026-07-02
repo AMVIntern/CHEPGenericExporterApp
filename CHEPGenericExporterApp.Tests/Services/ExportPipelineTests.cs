@@ -202,6 +202,14 @@ public sealed class ExportPipelineTests
         using var env = new ExportTestEnvironment();
         excel ??= CreateExcelServiceMock().Object;
         merge ??= CreateGocatorMergeService(env);
+        var reportEventLogger = new ReportEventLogger(
+    env.Configuration,
+    env.ExportPathsOptions(),
+    Options.Create(new SchedulerOptions
+    {
+        TimeZoneId = "UTC"
+    }),
+    NullLogger<ReportEventLogger>.Instance);
 
         return new ExportPipeline(
             merge,
@@ -211,6 +219,7 @@ public sealed class ExportPipelineTests
             missingAlerts,
             new Mock<IMissingFileSlottedAlertCoordinator>().Object,
             new CsvAuditLogger(CreateAuditConfiguration()),
+            reportEventLogger,
             Options.Create(new EmailOptions
             {
                 FromAddress = "test@example.com",
