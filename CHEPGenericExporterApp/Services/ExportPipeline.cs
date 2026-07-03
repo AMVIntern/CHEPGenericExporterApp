@@ -93,7 +93,7 @@ public sealed class ExportPipeline
         if (!sendEmailAfterMerge)
             return;
 
-        await TrySendGocatorReportEmailAsync(merge.CombinedCsvPath, ctx, cancellationToken, merge.SentSlottedMissingFileAlert)
+        await TrySendGocatorReportEmailAsync(merge.CombinedCsvPath, ctx, cancellationToken, merge.SentSlottedMissingFileAlert, merge.MissingInputs)
             .ConfigureAwait(false);
     }
 
@@ -104,7 +104,7 @@ public sealed class ExportPipeline
     {
         _csvAuditLogger.EnsureRow(ctx.Shift, ctx.ReportDate);
         var merge = await _gocatorMerge.GenerateCombinedCsvAsync(ctx, cancellationToken, targetDate).ConfigureAwait(false);
-        return await TrySendGocatorReportEmailAsync(merge.CombinedCsvPath, ctx, cancellationToken, merge.SentSlottedMissingFileAlert)
+        return await TrySendGocatorReportEmailAsync(merge.CombinedCsvPath, ctx, cancellationToken, merge.SentSlottedMissingFileAlert, merge.MissingInputs)
             .ConfigureAwait(false);
     }
 
@@ -118,7 +118,8 @@ public sealed class ExportPipeline
         string? csvPath,
         ReportSlotContext ctx,
         CancellationToken cancellationToken,
-        bool mergeStepAlreadySentSlottedMissingFileAlert = false)
+        bool mergeStepAlreadySentSlottedMissingFileAlert = false,
+        IReadOnlyList<string>? mergeMissingInputs = null)
     {
         // Guard against duplicate sends: if the audit already recorded a successful Gocator email
         // for this slot (e.g. after a PC/app restart with RunOnStart=true), skip re-sending.
@@ -147,9 +148,15 @@ public sealed class ExportPipeline
                     applyPerSlotMissingAlertLimit: true).ConfigureAwait(false);
             }
 
+            var gocatorMissingInputs = mergeMissingInputs is { Count: > 0 }
+                ? mergeMissingInputs
+                : [$"Gocator merged CSV: Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}"];
+            var gocatorReasonDetail = mergeMissingInputs is { Count: > 0 }
+                ? string.Join(" ", mergeMissingInputs)
+                : $"Gocator CSV not produced for Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}.";
             _reportEvents.Emit(ctx, ReportEventKind.GocatorFailed, ReportOutcomeReason.NoCsvFile,
-                $"Gocator CSV not produced for Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}.",
-                missingInputs: [$"Gocator merged CSV: Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}"]);
+                gocatorReasonDetail,
+                missingInputs: gocatorMissingInputs);
             return false;
         }
 
@@ -246,9 +253,15 @@ public sealed class ExportPipeline
             !File.Exists(reportResult.ExcelFilePath))
         {
             _logger.LogWarning("Combined Excel report was not produced; skipping email.");
+            var combinedMissingInputs = reportResult?.MissingInputs is { Count: > 0 }
+                ? reportResult.MissingInputs
+                : [$"Combined Excel report: Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}"];
+            var combinedReasonDetail = reportResult?.MissingInputs is { Count: > 0 }
+                ? string.Join(" ", reportResult.MissingInputs)
+                : $"Combined Excel report not produced for Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}.";
             _reportEvents.Emit(ctx, ReportEventKind.CombinedFailed, ReportOutcomeReason.ReportNotProduced,
-                $"Combined Excel report not produced for Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}.",
-                missingInputs: [$"Combined Excel report: Shift {ctx.Shift}, Date {ctx.ReportDateDdMmmYyyy}"]);
+                combinedReasonDetail,
+                missingInputs: combinedMissingInputs);
             return false;
         }
 

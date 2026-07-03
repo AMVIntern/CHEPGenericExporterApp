@@ -11,4 +11,7 @@ public sealed class CombinedReportResult
 
     /// <summary>Normalized report site code (e.g. AUH4) for operational alerts.</summary>
     public string SiteCode { get; init; } = "";
+
+    /// <summary>Specific missing-input lines (Gocator CSV, station files, etc.) when the report could not be produced.</summary>
+    public IReadOnlyList<string> MissingInputs { get; init; } = Array.Empty<string>();
 }
