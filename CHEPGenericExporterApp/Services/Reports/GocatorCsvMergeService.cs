@@ -94,7 +94,7 @@ public class GocatorCsvMergeService
             if (missing.Count > 0)
             {
                 var sent = await TrySendMergeMissingSlottedAsync(slot, missing, cancellationToken).ConfigureAwait(false);
-                return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: sent);
+                return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: sent, MissingInputs: missing);
             }
 
             var topFile = FindLatestValuesCsv(topFolder, effectiveDate, slot.Shift)!;
@@ -104,22 +104,24 @@ public class GocatorCsvMergeService
             if (topData == null || topData.Rows.Count == 0)
             {
                 _logger.LogWarning("Top CSV file has insufficient data rows.");
+                var topIssue = new[] { $"Top Gocator raw CSV is unreadable or has no data rows: {topFile}" };
                 var sentTop = await TrySendMergeMissingSlottedAsync(
                     slot,
-                    new[] { $"Top Gocator raw CSV is unreadable or has no data rows: {topFile}" },
+                    topIssue,
                     cancellationToken).ConfigureAwait(false);
-                return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: sentTop);
+                return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: sentTop, MissingInputs: topIssue);
             }
 
             var bottomData = ReadCsvFile(bottomFile, "Bottom");
             if (bottomData == null || bottomData.Rows.Count == 0)
             {
                 _logger.LogWarning("Bottom CSV file has insufficient data rows.");
+                var bottomIssue = new[] { $"Bottom Gocator raw CSV is unreadable or has no data rows: {bottomFile}" };
                 var sentBot = await TrySendMergeMissingSlottedAsync(
                     slot,
-                    new[] { $"Bottom Gocator raw CSV is unreadable or has no data rows: {bottomFile}" },
+                    bottomIssue,
                     cancellationToken).ConfigureAwait(false);
-                return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: sentBot);
+                return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: sentBot, MissingInputs: bottomIssue);
             }
 
             string topDateCol = FindColumnByName(topData.Headers, new[] { "top:date" });
@@ -131,14 +133,15 @@ public class GocatorCsvMergeService
                 string.IsNullOrEmpty(bottomDateCol) || string.IsNullOrEmpty(bottomTimestampCol))
             {
                 _logger.LogWarning("Could not find required date/timestamp columns in CSV files.");
+                var colsIssue = new[]
+                {
+                    "Could not find required date/timestamp columns in Top/Bottom CSV (need top:date, top:timestamp, bot:date, bot:timestamp)."
+                };
                 var sentCols = await TrySendMergeMissingSlottedAsync(
                     slot,
-                    new[]
-                    {
-                        "Could not find required date/timestamp columns in Top/Bottom CSV (need top:date, top:timestamp, bot:date, bot:timestamp)."
-                    },
+                    colsIssue,
                     cancellationToken).ConfigureAwait(false);
-                return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: sentCols);
+                return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: sentCols, MissingInputs: colsIssue);
             }
 
             CalculateFullTimestamps(topData.Rows, topDateCol, topTimestampCol);
@@ -220,14 +223,15 @@ public class GocatorCsvMergeService
             if (combinedRows.Count == 0)
             {
                 _logger.LogWarning("No matching rows found between Top and Bottom CSV files.");
+                var rowsIssue = new[]
+                {
+                    "No matching rows found between Top and Bottom Gocator CSV files (within 1.5s timestamp pairing)."
+                };
                 var sentRows = await TrySendMergeMissingSlottedAsync(
                     slot,
-                    new[]
-                    {
-                        "No matching rows found between Top and Bottom Gocator CSV files (within 1.5s timestamp pairing)."
-                    },
+                    rowsIssue,
                     cancellationToken).ConfigureAwait(false);
-                return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: sentRows);
+                return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: sentRows, MissingInputs: rowsIssue);
             }
 
             var _siteCode = _configuration.GetSection("ExportPaths")["NormalizedReportSiteCode"];
@@ -253,7 +257,8 @@ public class GocatorCsvMergeService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error generating Gocator combined CSV.");
-            return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: false);
+            return new GocatorMergeAttemptResult(null, SentSlottedMissingFileAlert: false,
+                MissingInputs: [$"Error generating Gocator combined CSV: {ex.Message}"]);
         }
     }
 

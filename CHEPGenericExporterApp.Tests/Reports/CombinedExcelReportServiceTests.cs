@@ -28,7 +28,7 @@ public sealed class CombinedExcelReportServiceTests
     }
 
     [Fact]
-    public async Task GenerateCombinedExcelReportAsync_returns_null_when_gocator_missing()
+    public async Task GenerateCombinedExcelReportAsync_returns_no_excel_path_with_missing_inputs_when_gocator_missing()
     {
         using var env = new ExportTestEnvironment();
         TestDataSeeder.CopyStationFiles(env);
@@ -37,7 +37,9 @@ public sealed class CombinedExcelReportServiceTests
 
         var result = await service.GenerateCombinedExcelReportAsync(slot);
 
-        Assert.Null(result);
+        Assert.NotNull(result);
+        Assert.Null(result!.ExcelFilePath);
+        Assert.NotEmpty(result.MissingInputs);
     }
 
     [Fact]
