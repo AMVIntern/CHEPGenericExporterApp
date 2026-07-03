@@ -157,7 +157,7 @@ public class CombinedExcelReportService
                     applyPerSlotMissingAlertLimit: true,
                     missing,
                     cancellationToken).ConfigureAwait(false);
-                return null;
+                return new CombinedReportResult { MissingInputs = missing, SiteCode = _siteCode };
             }
 
             // All inputs present — no partial report or alternate-day fallback
@@ -189,7 +189,11 @@ public class CombinedExcelReportService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error generating combined Excel report.");
-            return null;
+            return new CombinedReportResult
+            {
+                MissingInputs = [$"Error generating combined Excel report: {ex.Message}"],
+                SiteCode = _siteCode
+            };
         }
     }
 
