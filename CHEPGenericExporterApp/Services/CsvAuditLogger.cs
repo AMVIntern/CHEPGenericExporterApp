@@ -148,12 +148,15 @@ public sealed class CsvAuditLogger
         }
     }
 
+    /// <summary>Rows still needing a recovery attempt. Excludes rows where <c>MissingAlertFinalized</c> is
+    /// true, since those have already exhausted their missing-file alerts and further retries would just
+    /// re-fail forever against source data that's never coming.</summary>
     public IReadOnlyList<CsvAuditRow> GetPendingRows()
     {
         lock (_sync)
         {
             return ReadAllRowsNoLock()
-                .Where(r => !r.GocatorReportSent || !r.CombinedReportSent)
+                .Where(r => (!r.GocatorReportSent || !r.CombinedReportSent) && !r.MissingAlertFinalized)
                 .ToList();
         }
     }
