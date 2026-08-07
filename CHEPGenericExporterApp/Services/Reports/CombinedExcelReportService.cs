@@ -23,8 +23,10 @@ public class CombinedExcelReportService
     private readonly GocatorCsvMergeService _gocatorMerge;
     private readonly StationDummyShiftCsvService _dummyStationCsv;
     private readonly IMissingFileSlottedAlertCoordinator _missingFileAlerts;
+    private readonly IRowCountMismatchAlertSender _rowCountMismatchAlerts;
     private readonly bool _createDummyStationShiftCsvWhenMissing;
     private readonly HashSet<string> _excludedAttributes;
+    private readonly int _rowCountMismatchThreshold;
     private readonly HashSet<string> _boardSubHeaders;
     private readonly Dictionary<string, string> _stationPrefixes;
     private readonly ILogger<CombinedExcelReportService> _logger;
@@ -36,17 +38,21 @@ public class CombinedExcelReportService
 
     public CombinedExcelReportService(
         IOptions<ExportPathsOptions> pathsOptions,
+        IOptions<EmailOptions> emailOptions,
         ExportPathResolver pathResolver,
         GocatorCsvMergeService gocatorMerge,
         StationDummyShiftCsvService dummyStationCsv,
         IMissingFileSlottedAlertCoordinator missingFileAlerts,
+        IRowCountMismatchAlertSender rowCountMismatchAlerts,
         ILogger<CombinedExcelReportService> logger)
     {
         _gocatorMerge = gocatorMerge;
         _dummyStationCsv = dummyStationCsv;
         _missingFileAlerts = missingFileAlerts;
+        _rowCountMismatchAlerts = rowCountMismatchAlerts;
         _logger = logger;
         var o = pathsOptions.Value;
+        _rowCountMismatchThreshold = emailOptions.Value.RowCountMismatchThreshold;
         _createDummyStationShiftCsvWhenMissing = o.CreateDummyStationShiftCsvWhenMissing;
         _excludedAttributes = new HashSet<string>(o.NormalizedReportExcludedAttributes ?? Enumerable.Empty<string>(), StringComparer.OrdinalIgnoreCase);
         _boardSubHeaders = new HashSet<string>(o.NormalizedReportBoardSubHeaders ?? Enumerable.Empty<string>(), StringComparer.OrdinalIgnoreCase);
@@ -167,6 +173,9 @@ public class CombinedExcelReportService
             CalculateShiftTimestamps(s4Data!);
             CalculateShiftTimestamps(s5Data!);
 
+            await CheckRowCountMismatchAsync(reportCtx, s1Data!, s2Data!, s4Data!, s5Data!, cancellationToken)
+                .ConfigureAwait(false);
+
             string excelFileName = Path.Combine(_combinedReportFolder,
                 $"{_siteCode}_Combined_Report_Shift_{reportCtx.Shift}_{reportCtx.ReportDateDdMmmYyyy}.xlsx");
             CreateExcelFile(excelFileName, gocatorData!, s1Data!, s2Data!, s4Data!, s5Data!, out string normalizedCsvPath, out string normalizedZipPath);
@@ -195,6 +204,53 @@ public class CombinedExcelReportService
                 SiteCode = _siteCode
             };
         }
+    }
+
+    /// <summary>
+    /// Takes the row count straight from each raw input file for this shift — Gocator Top, Gocator Bottom, and
+    /// stations 1/2/4/5 — and sends one internal alert when the spread between the lowest and highest count
+    /// reaches <see cref="_rowCountMismatchThreshold"/>. Deliberately does NOT use the merged Gocator CSV's row
+    /// count (Top+Bottom matched within 1.5s): that number can differ from both raw inputs, which made the alert
+    /// misleading (e.g. "Gocator" shown as highest while the raw Top file actually had more rows). Every number in
+    /// this comparison — and in the resulting email — now traces directly to one real file's row count.
+    /// Does not block or alter report generation — purely a diagnostic alert.
+    /// </summary>
+    private async Task CheckRowCountMismatchAsync(
+        ReportSlotContext ctx,
+        ShiftData s1Data,
+        ShiftData s2Data,
+        ShiftData s4Data,
+        ShiftData s5Data,
+        CancellationToken cancellationToken)
+    {
+        if (_rowCountMismatchThreshold <= 0)
+            return;
+
+        var (topCount, bottomCount) = _gocatorMerge.GetRawTopBottomRowCounts(ctx);
+
+        var rowCounts = new List<(string SourceLabel, int RowCount)>();
+        if (topCount.HasValue)
+            rowCounts.Add(("Gocator Top", topCount.Value));
+        if (bottomCount.HasValue)
+            rowCounts.Add(("Gocator Bottom", bottomCount.Value));
+        rowCounts.Add(("Station 1 (S1)", s1Data.Rows.Count));
+        rowCounts.Add(("Station 2 (S2)", s2Data.Rows.Count));
+        rowCounts.Add(("Station 4 (S4)", s4Data.Rows.Count));
+        rowCounts.Add(("Station 5 (S5)", s5Data.Rows.Count));
+
+        var min = rowCounts.MinBy(r => r.RowCount);
+        var max = rowCounts.MaxBy(r => r.RowCount);
+        var diff = max.RowCount - min.RowCount;
+
+        if (diff < _rowCountMismatchThreshold)
+            return;
+
+        _logger.LogWarning(
+            "Row count mismatch detected for Shift {Shift}, Date {Date}: lowest {MinSource}={MinCount}, highest {MaxSource}={MaxCount}, diff {Diff} >= threshold {Threshold}.",
+            ctx.Shift, ctx.ReportDateDdMmmYyyy, min.SourceLabel, min.RowCount, max.SourceLabel, max.RowCount, diff, _rowCountMismatchThreshold);
+
+        await _rowCountMismatchAlerts.SendRowCountMismatchAlertAsync(ctx, rowCounts, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private CsvData ReadCsvFile(string filePath)
