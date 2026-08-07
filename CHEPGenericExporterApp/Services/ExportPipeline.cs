@@ -22,6 +22,13 @@ public sealed class ExportPipeline
     private readonly EmailOptions _email;
     private readonly ILogger<ExportPipeline> _logger;
 
+    // Serializes send attempts so the scheduled pipeline and the missed-email recovery worker (which run as
+    // two independent background loops sharing this singleton) can never both pass the IsGocatorSent/IsCombinedSent
+    // check for the same slot before either has finished — that race caused duplicate Gocator/Combined emails
+    // (and duplicate row-count-mismatch alerts, since GenerateCombinedExcelReportAsync ran twice).
+    private readonly SemaphoreSlim _gocatorSendLock = new(1, 1);
+    private readonly SemaphoreSlim _combinedSendLock = new(1, 1);
+
     public ExportPipeline(
         GocatorCsvMergeService gocatorMerge,
         CombinedExcelReportService excelReport,
@@ -120,6 +127,26 @@ public sealed class ExportPipeline
         CancellationToken cancellationToken,
         bool mergeStepAlreadySentSlottedMissingFileAlert = false,
         IReadOnlyList<string>? mergeMissingInputs = null)
+    {
+        await _gocatorSendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await TrySendGocatorReportEmailCoreAsync(
+                csvPath, ctx, cancellationToken, mergeStepAlreadySentSlottedMissingFileAlert, mergeMissingInputs)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            _gocatorSendLock.Release();
+        }
+    }
+
+    private async Task<bool> TrySendGocatorReportEmailCoreAsync(
+        string? csvPath,
+        ReportSlotContext ctx,
+        CancellationToken cancellationToken,
+        bool mergeStepAlreadySentSlottedMissingFileAlert,
+        IReadOnlyList<string>? mergeMissingInputs)
     {
         // Guard against duplicate sends: if the audit already recorded a successful Gocator email
         // for this slot (e.g. after a PC/app restart with RunOnStart=true), skip re-sending.
@@ -235,6 +262,19 @@ public sealed class ExportPipeline
     }
 
     private async Task<bool> TrySendCombinedReportEmailAsync(ReportSlotContext ctx, CancellationToken cancellationToken)
+    {
+        await _combinedSendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await TrySendCombinedReportEmailCoreAsync(ctx, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _combinedSendLock.Release();
+        }
+    }
+
+    private async Task<bool> TrySendCombinedReportEmailCoreAsync(ReportSlotContext ctx, CancellationToken cancellationToken)
     {
         // Guard against duplicate sends: if the audit already recorded a successful Combined email
         // for this slot (e.g. after a PC/app restart with RunOnStart=true), skip re-sending.

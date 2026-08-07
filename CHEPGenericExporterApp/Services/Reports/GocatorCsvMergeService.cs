@@ -262,6 +262,27 @@ public class GocatorCsvMergeService
         }
     }
 
+    /// <summary>
+    /// Reads just the row counts of the latest raw Top and Bottom Gocator CSVs for this slot (before the
+    /// Top/Bottom timestamp-pairing that produces the merged Gocator report). Used only for diagnostics — e.g. to
+    /// show which side (Top or Bottom) is driving a row-count-mismatch alert when the merged Gocator count is the
+    /// outlier. A side whose file can't be found or read comes back <c>null</c>.
+    /// </summary>
+    public (int? TopRowCount, int? BottomRowCount) GetRawTopBottomRowCounts(ReportSlotContext slot, DateTime? targetDate = null)
+    {
+        var topFolder = _pathResolver.Resolve(Paths.TopCsvFolder);
+        var bottomFolder = _pathResolver.Resolve(Paths.BottomCsvFolder);
+        var effectiveDate = targetDate ?? slot.ReportDate.ToDateTime(TimeOnly.MinValue);
+
+        var topFile = FindLatestValuesCsv(topFolder, effectiveDate, slot.Shift);
+        var bottomFile = FindLatestValuesCsv(bottomFolder, effectiveDate, slot.Shift);
+
+        int? topCount = topFile != null ? ReadCsvFile(topFile, "Top")?.Rows.Count : null;
+        int? bottomCount = bottomFile != null ? ReadCsvFile(bottomFile, "Bottom")?.Rows.Count : null;
+
+        return (topCount, bottomCount);
+    }
+
     private void AddTopBottomInputIssues(ReportSlotContext slot, List<string> missing, DateTime effectiveDate)
     {
         var topFolder = _pathResolver.Resolve(Paths.TopCsvFolder);
