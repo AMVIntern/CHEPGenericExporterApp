@@ -65,4 +65,28 @@ public sealed class EmailOptions
     /// <summary>Gocator-only body; <c>{0}</c> = date, <c>{1}</c> = shift.</summary>
     public string GocatorReportBodyTemplate { get; set; } =
         "Please find attached the Gocator Report for {0} corresponding to Shift {1}.";
+
+    /// <summary>
+    /// When the spread between the lowest and highest row count among Gocator and stations 1/2/4/5 reaches at
+    /// least this many rows, an internal row-count-mismatch alert is sent to <see cref="InternalAmvTeam"/>.
+    /// Set to 0 or less to disable this check.
+    /// </summary>
+    public int RowCountMismatchThreshold { get; set; } = 20;
+
+    /// <summary>Row-count-mismatch alert subject. Placeholders: <c>{shift}</c>, <c>{date}</c>.</summary>
+    public string RowCountMismatchAlertSubjectTemplate { get; set; } =
+        "Row count mismatch – Shift {shift}, {date}";
+
+    /// <summary>
+    /// Row-count-mismatch alert summary line (min vs max source). Placeholders: <c>{diff}</c>, <c>{shift}</c>,
+    /// <c>{date}</c>, <c>{minSource}</c>, <c>{minCount}</c>, <c>{maxSource}</c>, <c>{maxCount}</c>.
+    /// </summary>
+    public string RowCountMismatchAlertSummaryTemplate { get; set; } =
+        "Row count difference of {diff} for Shift {shift}, Date {date}: lowest is {minSource} ({minCount} rows), highest is {maxSource} ({maxCount} rows).";
+
+    /// <summary>
+    /// Row-count-mismatch alert body, one line per data source (Gocator, S1, S2, S4, S5). Placeholders:
+    /// <c>{source}</c>, <c>{count}</c>, <c>{shift}</c>, <c>{date}</c>.
+    /// </summary>
+    public string RowCountMismatchAlertLineTemplate { get; set; } = "{source}: {count} rows";
 }

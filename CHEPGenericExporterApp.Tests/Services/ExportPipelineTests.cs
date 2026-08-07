@@ -164,10 +164,12 @@ public sealed class ExportPipelineTests
         using var env = new ExportTestEnvironment();
         return new Mock<CombinedExcelReportService>(
             env.ExportPathsOptions(),
+            Options.Create(new EmailOptions()),
             env.PathResolver,
             CreateGocatorMergeService(env),
             new StationDummyShiftCsvService(),
             NoOpSlottedAlertCoordinator.Instance,
+            NoOpRowCountMismatchAlertSender.Instance,
             NullLogger<CombinedExcelReportService>.Instance);
     }
 
