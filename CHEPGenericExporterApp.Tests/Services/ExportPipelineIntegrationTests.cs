@@ -41,6 +41,14 @@ public sealed class ExportPipelineIntegrationTests
                 It.IsAny<ReportSlotContext?>(),
                 It.IsAny<bool>()))
             .Returns(Task.CompletedTask);
+
+        var rowCountMismatchAlerts = new Mock<IRowCountMismatchAlertSender>();
+        rowCountMismatchAlerts
+            .Setup(s => s.SendRowCountMismatchAlertAsync(
+                It.IsAny<ReportSlotContext>(),
+                It.IsAny<IReadOnlyList<(string, int)>>(),
+                It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
         var reportEventLogger = new ReportEventLogger(
     env.Configuration,
     env.ExportPathsOptions(),
@@ -60,6 +68,7 @@ public sealed class ExportPipelineIntegrationTests
                 env.Configuration),
             new CombinedExcelReportService(
                 env.ExportPathsOptions(),
+                Options.Create(new EmailOptions()),
                 env.PathResolver,
                 new GocatorCsvMergeService(
                     env.ExportPathsOptions(),
@@ -70,6 +79,7 @@ public sealed class ExportPipelineIntegrationTests
                     env.Configuration),
                 new StationDummyShiftCsvService(),
                 NoOpSlottedAlertCoordinator.Instance,
+                rowCountMismatchAlerts.Object,
                 NullLogger<CombinedExcelReportService>.Instance),
             emailSender.Object,
             new ScheduleCalculator(Options.Create(new SchedulerOptions

@@ -25,6 +25,7 @@ builder.Services.AddSingleton<IEmailSender, ReliableEmailSender>();
 builder.Services.AddSingleton<CsvAuditLogger>();
 builder.Services.AddSingleton<ReportEventLogger>();
 builder.Services.AddSingleton<IMissingFileAlertSender, MissingFileAlertSender>();
+builder.Services.AddSingleton<IRowCountMismatchAlertSender, RowCountMismatchAlertSender>();
 builder.Services.AddSingleton<IMissingFileSlottedAlertCoordinator, MissingFileSlottedAlertCoordinator>();
 builder.Services.AddSingleton<GocatorCsvMergeService>();
 builder.Services.AddSingleton<StationDummyShiftCsvService>();
