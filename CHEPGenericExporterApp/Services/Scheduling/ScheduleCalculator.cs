@@ -87,9 +87,10 @@ public sealed class ScheduleCalculator : IScheduleCalculator
         // second slot (typically 14:xx) → Shift 1 of same date.
         // third slot  (typically 22:xx) → Shift 2 of same date.
         //
-        // Sunday's only run (22:xx) also follows this mapping (→ Shift 2, same date), so
-        // Shift 3 for the Sunday→Monday overnight is reported by Monday's 06:xx run, same
-        // as every other overnight shift.
+        // Every day's Shift 3 is reported by the *following* day's 06:xx run — this is why
+        // Saturday's own Shift 3 is produced by Sunday's 06:xx slot (→ "3", Saturday), and
+        // Sunday's Shift 3 continues to be produced by Monday's 06:xx run (→ "3", Sunday),
+        // same as every other overnight shift.
         if (_gocatorSlots.Length == 3)
         {
             return slotIndex switch
@@ -104,7 +105,15 @@ public sealed class ScheduleCalculator : IScheduleCalculator
         return ((slotIndex + 1).ToString(CultureInfo.InvariantCulture), jobLocalDate);
     }
 
-    /// <summary>Saturday skipped. Sunday: last slot pair only. Mon–Fri: all pairs (Gocator then combined).</summary>
+    /// <summary>
+    /// Saturday: slots 1–2 only (Shifts 1, 2 of Saturday). Saturday's Shift 3 is <b>not</b> produced here —
+    /// per the shift-numbering convention (slot 0 = Shift 3 of the <i>previous</i> day), it is produced by
+    /// Sunday's slot 0, the same way every other day's Shift 3 is produced by the following day's slot 0.
+    /// Sunday: all 3 slots — slot 0 yields Shift 3 dated Saturday, slots 1–2 yield Sunday's own Shift 1, 2.
+    /// Sunday's own Shift 3 is intentionally not produced by either branch: it is already produced by
+    /// Monday's slot 0 (unchanged, pre-existing behaviour).
+    /// Mon–Fri: all 3 slots, unchanged.
+    /// </summary>
     private ScheduledJob GetNextAmvJob(DateTimeOffset afterUtc)
     {
         var now = TimeZoneInfo.ConvertTime(afterUtc, _timeZone).DateTime;
@@ -113,12 +122,6 @@ public sealed class ScheduleCalculator : IScheduleCalculator
         {
             var day = now.DayOfWeek;
             var date = now.Date;
-
-            if (day == DayOfWeek.Saturday)
-            {
-                now = date.AddDays(1);
-                continue;
-            }
 
             var events = new List<(DateTimeOffset Utc, ScheduledJobKind Kind)>(6);
             AppendAmvEventsForDay(date, day, events);
@@ -138,20 +141,44 @@ public sealed class ScheduleCalculator : IScheduleCalculator
 
     private void AppendAmvEventsForDay(DateTime date, DayOfWeek day, List<(DateTimeOffset Utc, ScheduledJobKind Kind)> events)
     {
-        if (day == DayOfWeek.Saturday)
-            return;
-
         var g = _gocatorSlots;
         var c = _combinedSlots;
 
-        if (day == DayOfWeek.Sunday)
+        // Saturday: slots 1–2 only (Shift 1, Shift 2 of Saturday).
+        // Slot 0 is deliberately excluded here — on Saturday's date it would resolve to
+        // "Shift 3 of Friday" (MapShiftAndDate maps slot 0 to the previous day), which the
+        // system has never sent (Saturday was fully skipped before this change) and must stay
+        // that way to keep Mon–Fri behaviour unchanged. Saturday's own Shift 3 is produced by
+        // Sunday's slot 0 below, consistent with how every other day's Shift 3 is produced by
+        // the following day's slot 0 (see Monday, which already does this for Sunday's Shift 3).
+        if (day == DayOfWeek.Saturday)
         {
-            var i = g.Length - 1;
-            events.Add((WallTimeInZoneToUtc(date + g[i]), ScheduledJobKind.GocatorMerge));
-            events.Add((WallTimeInZoneToUtc(date + c[i]), ScheduledJobKind.CombinedReportAndEmail));
+            for (var i = 1; i < g.Length; i++)
+            {
+                events.Add((WallTimeInZoneToUtc(date + g[i]), ScheduledJobKind.GocatorMerge));
+                events.Add((WallTimeInZoneToUtc(date + c[i]), ScheduledJobKind.CombinedReportAndEmail));
+            }
             return;
         }
 
+        // Sunday: all 3 slots.
+        //   slot 0 (e.g. 06:00) -> Shift 3, dated Saturday  (satisfies "Saturday Shift 3")
+        //   slot 1 (e.g. 14:00) -> Shift 1, dated Sunday    (satisfies "Sunday Shift 1")
+        //   slot 2 (e.g. 22:00) -> Shift 2, dated Sunday    (pre-existing — this is the one slot
+        //                                                    Sunday already processed before this change)
+        // Sunday's own Shift 3 is NOT produced here; it continues to be produced by Monday's
+        // slot 0, exactly as it already was — untouched by this change.
+        if (day == DayOfWeek.Sunday)
+        {
+            for (var i = 0; i < g.Length; i++)
+            {
+                events.Add((WallTimeInZoneToUtc(date + g[i]), ScheduledJobKind.GocatorMerge));
+                events.Add((WallTimeInZoneToUtc(date + c[i]), ScheduledJobKind.CombinedReportAndEmail));
+            }
+            return;
+        }
+
+        // Monday–Friday: all slot pairs, unchanged.
         if (day is >= DayOfWeek.Monday and <= DayOfWeek.Friday)
         {
             for (var i = 0; i < g.Length; i++)
