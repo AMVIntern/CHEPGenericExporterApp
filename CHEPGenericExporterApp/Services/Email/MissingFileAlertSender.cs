@@ -38,6 +38,29 @@ public sealed class MissingFileAlertSender : IMissingFileAlertSender
         ReportSlotContext? scheduledSlot = null,
         bool applyPerSlotMissingAlertLimit = false)
     {
+        // Suppress file-missing alerts for Saturday's shifts and Sunday's Shift 1/2 — but NOT
+        // Sunday's Shift 3, which is produced by Monday's slot-0 job (ReportDate == Sunday) and
+        // must keep its existing, unsuppressed behaviour unchanged ("already handled by the
+        // existing system"). Every ReportSlotContext in this codebase (scheduler, recovery
+        // worker, filename parsing) carries the true business Shift/Date, never wall-clock
+        // firing time, so the rule is expressed purely on (Shift, ReportDate.DayOfWeek) —
+        // that makes it correct for the recovery path too, not just the live scheduler.
+        if (scheduledSlot is { } weekendCheckSlot)
+        {
+            var dayOfWeek = weekendCheckSlot.ReportDate.DayOfWeek;
+            var isSaturdayShift = dayOfWeek == DayOfWeek.Saturday;
+            var isSundayShift1Or2 = dayOfWeek == DayOfWeek.Sunday && weekendCheckSlot.Shift != "3";
+            if (isSaturdayShift || isSundayShift1Or2)
+            {
+                _logger.LogInformation(
+                    "File-missing alert suppressed for {Day}, Shift {Shift}, Date {Date}.",
+                    dayOfWeek,
+                    weekendCheckSlot.Shift,
+                    weekendCheckSlot.ReportDateDdMmmYyyy);
+                return;
+            }
+        }
+
         var lines = missingDescriptions.Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()).ToList();
         if (lines.Count == 0)
             return;
